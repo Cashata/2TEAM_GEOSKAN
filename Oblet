@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""
+Скрипт для Pioneer Mini 2: полёт по точкам + фотосъёмка в каждой точке.
+Координаты задаются в локальной системе (относительно точки взлета).
+"""
+
+from pioneer_sdk import Pioneer
+import time
+import sys
+
+# 📍 Точки маршрута: (x, y, z) в метрах. Z - высота над точкой взлета.
+WAYPOINTS = [
+    (1.5, 0.0, 1.2),
+    (1.5, 1.5, 1.2),
+    (0.0, 1.5, 1.2),
+    (0.0, 0.0, 1.2)
+]
+
+def wait_for_drone_state(drone, target_state, timeout=10):
+    """Ожидание перехода дрона в нужное состояние (упрощённая реализация)."""
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            state = drone.get_state()
+            if state.get("flight_state") == target_state:
+                return True
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return False
+
+def main():
+    drone = None
+    try:
+        print("🔌 Инициализация Pioneer Mini 2...")
+        drone = Pioneer()
+        
+        print("🛫 Взлет...")
+        drone.takeoff()
+        time.sleep(4)  # Стабилизация после взлета
+
+        for i, (x, y, z) in enumerate(WAYPOINTS, 1):
+            print(f"\n📍 Точка {i}/{len(WAYPOINTS)}: X={x}, Y={y}, Z={z}")
+            
+            # Отправка команды полёта
+            drone.go_to_local_point(x=x, y=y, z=z)
+            
+            # Ожидание прибытия (адаптируйте под реальные условия)
+            # В продвинутых версиях SDK используйте drone.wait_for_arrival()
+            time.sleep(5)
+            
+            print(f"📸 Съемка в точке {i}...")
+            drone.take_photo()
+            time.sleep(1.5)  # Задержка для сохранения файла
+
+        print("\n✅ Маршрут завершён. Посадка...")
+        drone.land()
+        
+    except KeyboardInterrupt:
+        print("\n⛔ Прерывание пользователем. Аварийная посадка...")
+        if drone:
+            drone.land()
+    except Exception as e:
+        print(f"\n❌ Ошибка: {e}")
+        if drone:
+            drone.land()
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
