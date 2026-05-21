@@ -1,70 +1,80 @@
 #!/usr/bin/env python3
 """
-Скрипт для Pioneer Mini 2: полёт по точкам + фотосъёмка в каждой точке.
-Координаты задаются в локальной системе (относительно точки взлета).
+Simple Pioneer Mini 2 local waypoint flight using Pioneer-SDK2.
+
+Run this on Pioneer Mini 2 / Pioneer OS, where pioneer_sdk2 is available.
+Coordinates are local: X/Y are meters from the takeoff point, Z is height.
 """
 
-from pioneer_sdk import Pioneer
-import time
-import sys
+from __future__ import annotations
 
-# 📍 Точки маршрута: (x, y, z) в метрах. Z - высота над точкой взлета.
+import sys
+import time
+
+from pioneer_sdk2 import Pioneer
+
+
 WAYPOINTS = [
     (1.5, 0.0, 1.2),
     (1.5, 1.5, 1.2),
     (0.0, 1.5, 1.2),
-    (0.0, 0.0, 1.2)
+    (0.0, 0.0, 1.2),
 ]
 
-def wait_for_drone_state(drone, target_state, timeout=10):
-    """Ожидание перехода дрона в нужное состояние (упрощённая реализация)."""
-    start = time.time()
-    while time.time() - start < timeout:
-        try:
-            state = drone.get_state()
-            if state.get("flight_state") == target_state:
-                return True
-        except Exception:
-            pass
-        time.sleep(0.5)
+YAW_DEG = 0.0
+POINT_TIME = 0
+MOVE_TIMEOUT = 15.0
+POLL_INTERVAL = 0.1
+
+
+def wait_for_point(drone: Pioneer, timeout: float = MOVE_TIMEOUT) -> bool:
+    start = time.monotonic()
+    while time.monotonic() - start < timeout:
+        if drone.point_reached():
+            return True
+        time.sleep(POLL_INTERVAL)
     return False
 
-def main():
-    drone = None
+
+def main() -> int:
+    drone = Pioneer(wait_callback=True, safety_command=True)
+
     try:
-        print("🔌 Инициализация Pioneer Mini 2...")
-        drone = Pioneer()
-        
-        print("🛫 Взлет...")
-        drone.takeoff()
-        time.sleep(4)  # Стабилизация после взлета
+        print("Arming...")
+        if drone.arm(timeout=5, retries=1) is False:
+            raise RuntimeError("arm() returned False")
 
-        for i, (x, y, z) in enumerate(WAYPOINTS, 1):
-            print(f"\n📍 Точка {i}/{len(WAYPOINTS)}: X={x}, Y={y}, Z={z}")
-            
-            # Отправка команды полёта
-            drone.go_to_local_point(x=x, y=y, z=z)
-            
-            # Ожидание прибытия (адаптируйте под реальные условия)
-            # В продвинутых версиях SDK используйте drone.wait_for_arrival()
-            time.sleep(5)
-            
-            print(f"📸 Съемка в точке {i}...")
-            drone.take_photo()
-            time.sleep(1.5)  # Задержка для сохранения файла
+        print("Takeoff...")
+        if drone.takeoff() is False:
+            raise RuntimeError("takeoff() returned False")
+        time.sleep(3)
 
-        print("\n✅ Маршрут завершён. Посадка...")
+        for index, (x, y, z) in enumerate(WAYPOINTS, 1):
+            print(f"Point {index}/{len(WAYPOINTS)}: x={x:.2f}, y={y:.2f}, z={z:.2f}")
+            ok = drone.go_to_local_point(x=x, y=y, z=z, yaw=YAW_DEG, time=POINT_TIME)
+            if ok is False:
+                print("WARNING: go_to_local_point() returned False", file=sys.stderr)
+
+            if not wait_for_point(drone):
+                print(f"WARNING: point {index} timeout", file=sys.stderr)
+
+        print("Landing...")
         drone.land()
-        
+        return 0
+
     except KeyboardInterrupt:
-        print("\n⛔ Прерывание пользователем. Аварийная посадка...")
-        if drone:
+        print("Interrupted. Landing...")
+        drone.land()
+        return 130
+
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        try:
             drone.land()
-    except Exception as e:
-        print(f"\n❌ Ошибка: {e}")
-        if drone:
-            drone.land()
-        sys.exit(1)
+        except Exception as land_exc:
+            print(f"ERROR during landing: {land_exc}", file=sys.stderr)
+        return 1
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -8,14 +8,14 @@ This combines two ideas:
 
 Default behavior:
   - reference map: map.jpg
-  - camera: OpenCV VideoCapture(0)
+  - camera: Pioneer-SDK2 Camera.get_cv_frame()
   - waypoints: a small square relative to the takeoff point
 
 Local camera/localization test without drone:
   python fly_orb_ransac.py --no-flight --reference map.jpg --camera-index 0
 
 Real flight:
-  python3 fly_orb_ransac.py --reference map.jpg --camera-source pioneer-raw
+  python3 fly_orb_ransac.py --reference map.jpg
 """
 
 from __future__ import annotations
@@ -42,7 +42,18 @@ DEFAULT_WAYPOINTS = [
     (0.0, 0.0, 1.0),
 ]
 
-LAND_COMMANDS = {"land", "stop", "q", "quit", "exit", "посадка", "сесть", "стоп"}
+LAND_COMMANDS = {
+    "land",
+    "stop",
+    "q",
+    "quit",
+    "exit",
+    "posadka",
+    "sest",
+    "посадка",
+    "сесть",
+    "стоп",
+}
 
 
 @dataclass
@@ -203,26 +214,39 @@ class OpenCvCamera:
         self.cap.release()
 
 
-class PioneerRawCamera:
-    def __init__(self, drone) -> None:
-        self.drone = drone
+class Sdk2Camera:
+    def __init__(self, sdk2, timeout: float) -> None:
+        try:
+            self.camera = sdk2.Camera(camera_type=sdk2.CameraType.MAIN)
+        except TypeError:
+            self.camera = sdk2.Camera(sdk2.CameraType.MAIN)
+        self.timeout = timeout
 
     def read(self) -> np.ndarray | None:
-        raw = self.drone.get_raw_video_frame()
-        if raw is None:
-            return None
-        return cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+        return self.camera.get_cv_frame(timeout=self.timeout)
 
     def close(self) -> None:
-        pass
+        if hasattr(self.camera, "stop"):
+            self.camera.stop()
 
 
-def import_pioneer_class():
+def import_pioneer_sdk2():
     try:
-        module = importlib.import_module("pioneer_sdk")
+        return importlib.import_module("pioneer_sdk2")
     except ModuleNotFoundError as exc:
-        raise RuntimeError("pioneer_sdk is not installed in this Python environment") from exc
-    return module.Pioneer
+        if exc.name != "pioneer_sdk2":
+            raise
+        raise RuntimeError(
+            "pioneer_sdk2 is not installed in this Python environment. "
+            "Run real flights on Pioneer Mini 2 / Pioneer OS, or use --no-flight locally."
+        ) from exc
+
+
+def create_pioneer(sdk2):
+    try:
+        return sdk2.Pioneer(wait_callback=True, safety_command=True)
+    except TypeError:
+        return sdk2.Pioneer()
 
 
 def parse_waypoint(value: str) -> tuple[float, float, float]:
@@ -302,7 +326,7 @@ def resolve_waypoints(args: argparse.Namespace) -> list[tuple[float, float, floa
 
 def start_command_listener(stop_event: threading.Event) -> threading.Thread:
     def listen() -> None:
-        print("Type 'land', 'stop', 'q', 'посадка' or 'сесть' + Enter for graceful landing.")
+        print("Type 'land', 'stop', 'q', 'posadka' or 'sest' + Enter for graceful landing.")
         while not stop_event.is_set():
             try:
                 line = sys.stdin.readline()
@@ -346,19 +370,46 @@ def result_row(point_index: int, result: LocalizeResult) -> dict[str, object]:
     return row
 
 
-def command_local_point(drone, x: float, y: float, z: float, speed: float, yaw: float) -> None:
-    if hasattr(drone, "move_to_local"):
-        drone.move_to_local(x, y, z, speed=speed)
-        return
+def estimate_move_time(
+    previous_point: tuple[float, float, float],
+    next_point: tuple[float, float, float],
+    speed: float,
+) -> int:
+    distance = math.dist(previous_point, next_point)
+    return max(1, int(math.ceil(distance / speed)))
 
-    if hasattr(drone, "go_to_local_point"):
+
+def command_local_point(drone, x: float, y: float, z: float, yaw: float, point_time: int) -> None:
+    try:
+        result = drone.go_to_local_point(x=x, y=y, z=z, yaw=yaw, time=point_time)
+    except TypeError:
+        result = drone.go_to_local_point(x, y, z, yaw, point_time)
+
+    if result is False:
+        print("WARNING: go_to_local_point returned False", file=sys.stderr)
+
+
+def wait_for_point(
+    drone,
+    timeout: float,
+    poll_interval: float,
+    stop_event: threading.Event,
+) -> bool:
+    if not hasattr(drone, "point_reached"):
+        time.sleep(timeout)
+        return True
+
+    start = time.monotonic()
+    while time.monotonic() - start < timeout and not stop_event.is_set():
         try:
-            drone.go_to_local_point(x=x, y=y, z=z, yaw=yaw)
-        except TypeError:
-            drone.go_to_local_point(x, y, z, yaw)
-        return
+            if drone.point_reached():
+                return True
+        except Exception as exc:
+            print("WARNING: point_reached() failed: {}".format(exc), file=sys.stderr)
+            break
+        time.sleep(poll_interval)
 
-    raise RuntimeError("Drone object has neither move_to_local() nor go_to_local_point()")
+    return False
 
 
 def process_camera_for_seconds(
@@ -442,26 +493,48 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
             cv2.destroyAllWindows()
         return 0
 
-    Pioneer = import_pioneer_class()
-    drone = Pioneer()
-    camera = PioneerRawCamera(drone) if args.camera_source == "pioneer-raw" else OpenCvCamera(args.camera_index)
+    sdk2 = import_pioneer_sdk2()
+    drone = create_pioneer(sdk2)
+    if args.camera_source == "pioneer-raw":
+        print("WARNING: --camera-source pioneer-raw is deprecated; using SDK2 Camera.get_cv_frame().")
+        camera = Sdk2Camera(sdk2, args.camera_timeout)
+    elif args.camera_source == "sdk2":
+        camera = Sdk2Camera(sdk2, args.camera_timeout)
+    else:
+        camera = OpenCvCamera(args.camera_index)
 
     try:
         print("Arming...")
         if hasattr(drone, "arm"):
-            drone.arm()
+            armed = drone.arm(timeout=5, retries=1)
+            if armed is False:
+                raise RuntimeError("pioneer.arm() returned False")
 
         print("Takeoff...")
-        drone.takeoff()
+        takeoff = drone.takeoff()
+        if takeoff is False:
+            raise RuntimeError("pioneer.takeoff() returned False")
         time.sleep(args.takeoff_wait)
 
+        previous_point = (0.0, 0.0, 0.0)
         for point_index, (x, y, z) in enumerate(waypoints, 1):
             if stop_event.is_set():
                 print("Route interrupted before point {}. Landing...".format(point_index))
                 break
 
             print("Point {}: x={} y={} z={}".format(point_index, x, y, z))
-            command_local_point(drone, x, y, z, speed=args.speed, yaw=args.yaw)
+            next_point = (x, y, z)
+            point_time = args.point_time or estimate_move_time(previous_point, next_point, args.speed)
+            command_local_point(drone, x, y, z, yaw=args.yaw, point_time=point_time)
+
+            reached = wait_for_point(
+                drone=drone,
+                timeout=args.move_timeout,
+                poll_interval=args.poll_interval,
+                stop_event=stop_event,
+            )
+            if not reached and not stop_event.is_set():
+                print("WARNING: waypoint {} was not confirmed before timeout".format(point_index), file=sys.stderr)
 
             process_camera_for_seconds(
                 camera=camera,
@@ -473,6 +546,7 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
                 debug_dir=args.debug_dir,
                 stop_event=stop_event,
             )
+            previous_point = next_point
 
         print("Landing...")
         drone.land()
@@ -524,9 +598,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ransac-threshold", type=float, default=5.0)
     parser.add_argument("--speed", type=float, default=0.5)
     parser.add_argument("--yaw", type=float, default=0.0)
+    parser.add_argument("--point-time", type=int, default=0)
+    parser.add_argument("--move-timeout", type=float, default=15.0)
+    parser.add_argument("--poll-interval", type=float, default=0.1)
     parser.add_argument("--takeoff-wait", type=float, default=2.0)
     parser.add_argument("--wait-per-point", type=float, default=3.0)
-    parser.add_argument("--camera-source", choices=["opencv", "pioneer-raw"], default="pioneer-raw")
+    parser.add_argument("--camera-source", choices=["opencv", "sdk2", "pioneer-raw"], default="sdk2")
+    parser.add_argument("--camera-timeout", type=float, default=2.0)
     parser.add_argument("--camera-index", type=int, default=0)
     parser.add_argument("--csv", default="orb_ransac_localization.csv")
     parser.add_argument("--debug-dir")
@@ -566,6 +644,12 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--ransac-threshold must be positive")
     if args.speed <= 0:
         raise ValueError("--speed must be positive")
+    if args.point_time < 0:
+        raise ValueError("--point-time must be >= 0")
+    if args.move_timeout <= 0 or args.poll_interval <= 0:
+        raise ValueError("--move-timeout and --poll-interval must be positive")
+    if args.camera_timeout <= 0:
+        raise ValueError("--camera-timeout must be positive")
     if args.takeoff_wait < 0 or args.wait_per_point <= 0 or args.no_flight_seconds <= 0:
         raise ValueError("wait times must be valid positive values")
     if args.area_size <= 0:
