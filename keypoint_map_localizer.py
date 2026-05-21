@@ -10,7 +10,7 @@ Pipeline:
 
 Examples:
   python3 keypoint_map_localizer.py --reference map_reference.png --image frame.jpg
-  python3 keypoint_map_localizer.py --reference map_reference.png --video flight.mp4 --show
+  python3 keypoint_map_localizer.py --reference map_reference.png --video flight.mp4 --output-dir debug
   python3 keypoint_map_localizer.py --reference map_reference.png --mini2-camera
 """
 
@@ -259,6 +259,29 @@ def import_pioneer_sdk2():
         ) from exc
 
 
+def resolve_sdk2_camera_type(sdk2, camera_type_name: str):
+    camera_type_name = camera_type_name.upper()
+    if hasattr(sdk2.CameraType, camera_type_name):
+        return getattr(sdk2.CameraType, camera_type_name)
+
+    available = sorted(name for name in dir(sdk2.CameraType) if name.isupper())
+    raise RuntimeError(
+        "SDK2 CameraType.{} is unavailable. Available camera types: {}".format(
+            camera_type_name,
+            ", ".join(available) if available else "unknown",
+        )
+    )
+
+
+def warn_show_disabled(show: bool) -> None:
+    if show:
+        print(
+            "WARNING: --show is ignored because this may run on OpenCV without HighGUI. "
+            "Use --output-dir for debug images instead.",
+            file=sys.stderr,
+        )
+
+
 def append_csv(path: Path, row: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     file_exists = path.exists()
@@ -300,11 +323,6 @@ def handle_frame(
         ref_debug = localizer.draw_reference_debug(frame_bgr, result, args.draw_no_fly)
         cv2.imwrite(str(out_dir / f"ref_debug_{frame_id:06d}.jpg"), ref_debug)
 
-    if args.show:
-        ref_debug = localizer.draw_reference_debug(frame_bgr, result, args.draw_no_fly)
-        cv2.imshow("reference_debug", ref_debug)
-        cv2.imshow("frame", frame_bgr)
-
     return result
 
 
@@ -331,23 +349,22 @@ def run_image(localizer: KeypointMapLocalizer, args: argparse.Namespace) -> int:
     if frame is None:
         raise FileNotFoundError(f"cannot read image: {args.image}")
     handle_frame(localizer, frame, 0, args)
-    if args.show:
-        cv2.waitKey(0)
     return 0
 
 
 def run_video(localizer: KeypointMapLocalizer, args: argparse.Namespace) -> int:
     for frame_id, frame in iter_video_frames(args.video, args.frame_step):
         handle_frame(localizer, frame, frame_id, args)
-        if args.show and cv2.waitKey(1) == 27:
-            break
-    cv2.destroyAllWindows()
     return 0
 
 
 def run_mini2_camera(localizer: KeypointMapLocalizer, args: argparse.Namespace) -> int:
     sdk2 = import_pioneer_sdk2()
-    camera = sdk2.Camera(camera_type=sdk2.CameraType.MAIN)
+    camera_type = resolve_sdk2_camera_type(sdk2, args.sdk2_camera_type)
+    try:
+        camera = sdk2.Camera(camera_type=camera_type)
+    except TypeError:
+        camera = sdk2.Camera(camera_type)
 
     try:
         frame_id = 0
@@ -360,12 +377,9 @@ def run_mini2_camera(localizer: KeypointMapLocalizer, args: argparse.Namespace) 
             handle_frame(localizer, frame, frame_id, args)
             frame_id += 1
 
-            if args.show and cv2.waitKey(1) == 27:
-                break
             time.sleep(args.frame_interval)
     finally:
         camera.stop()
-        cv2.destroyAllWindows()
 
     return 0
 
@@ -392,9 +406,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--frame-step", type=int, default=1, help="Process every Nth video frame.")
     parser.add_argument("--frame-interval", type=float, default=0.05, help="Delay between Mini 2 camera frames.")
     parser.add_argument("--max-frames", type=int, default=0, help="Mini 2 camera frame limit. 0 means unlimited.")
+    parser.add_argument("--sdk2-camera-type", default="OPT", help="SDK2 CameraType name for --mini2-camera.")
     parser.add_argument("--csv", help="Optional CSV log path.")
     parser.add_argument("--output-dir", help="Optional directory for debug images.")
-    parser.add_argument("--show", action="store_true", help="Show OpenCV debug windows.")
+    parser.add_argument("--show", action="store_true", help="Deprecated: ignored on headless/OpenCV-no-GUI builds.")
     parser.add_argument("--draw-no-fly", action="store_true", help="Draw built-in H-shaped no-fly polygons.")
     return parser
 
@@ -402,6 +417,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    warn_show_disabled(args.show)
 
     localizer = KeypointMapLocalizer(
         reference_path=args.reference,

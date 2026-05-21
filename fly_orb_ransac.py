@@ -8,7 +8,7 @@ This combines two ideas:
 
 Default behavior:
   - reference map: map.jpg
-  - camera: Pioneer-SDK2 Camera.get_cv_frame()
+  - camera: Pioneer-SDK2 Camera.get_cv_frame() from CameraType.OPT
   - waypoints: a small square relative to the takeoff point
 
 Local camera/localization test without drone:
@@ -215,11 +215,12 @@ class OpenCvCamera:
 
 
 class Sdk2Camera:
-    def __init__(self, sdk2, timeout: float) -> None:
+    def __init__(self, sdk2, camera_type_name: str, timeout: float) -> None:
+        camera_type = resolve_sdk2_camera_type(sdk2, camera_type_name)
         try:
-            self.camera = sdk2.Camera(camera_type=sdk2.CameraType.MAIN)
+            self.camera = sdk2.Camera(camera_type=camera_type)
         except TypeError:
-            self.camera = sdk2.Camera(sdk2.CameraType.MAIN)
+            self.camera = sdk2.Camera(camera_type)
         self.timeout = timeout
 
     def read(self) -> np.ndarray | None:
@@ -247,6 +248,29 @@ def create_pioneer(sdk2):
         return sdk2.Pioneer(wait_callback=True, safety_command=True)
     except TypeError:
         return sdk2.Pioneer()
+
+
+def resolve_sdk2_camera_type(sdk2, camera_type_name: str):
+    camera_type_name = camera_type_name.upper()
+    if hasattr(sdk2.CameraType, camera_type_name):
+        return getattr(sdk2.CameraType, camera_type_name)
+
+    available = sorted(name for name in dir(sdk2.CameraType) if name.isupper())
+    raise RuntimeError(
+        "SDK2 CameraType.{} is unavailable. Available camera types: {}".format(
+            camera_type_name,
+            ", ".join(available) if available else "unknown",
+        )
+    )
+
+
+def warn_show_disabled(show: bool) -> None:
+    if show:
+        print(
+            "WARNING: --show is ignored here because onboard OpenCV may be built without HighGUI. "
+            "Use --debug-dir to save debug images instead.",
+            file=sys.stderr,
+        )
 
 
 def parse_waypoint(value: str) -> tuple[float, float, float]:
@@ -444,20 +468,13 @@ def process_camera_for_seconds(
             debug = localizer.draw_debug(frame, result, homography)
             cv2.imwrite(str(out / "debug_p{:03d}_f{:05d}.jpg".format(point_index, frame_id)), debug)
 
-        if show:
-            debug = localizer.draw_debug(frame, result, homography)
-            cv2.imshow("frame", frame)
-            cv2.imshow("map_debug", debug)
-            if cv2.waitKey(1) == 27:
-                print("ESC pressed, stopping camera loop")
-                stop_event.set()
-                break
-
         frame_id += 1
         time.sleep(0.03)
 
 
 def fly_local_waypoints(args: argparse.Namespace) -> int:
+    warn_show_disabled(args.show)
+
     localizer = OrbRansacLocalizer(
         reference_path=args.reference,
         map_width_m=args.map_width_m,
@@ -490,16 +507,15 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
             )
         finally:
             camera.close()
-            cv2.destroyAllWindows()
         return 0
 
     sdk2 = import_pioneer_sdk2()
     drone = create_pioneer(sdk2)
     if args.camera_source == "pioneer-raw":
         print("WARNING: --camera-source pioneer-raw is deprecated; using SDK2 Camera.get_cv_frame().")
-        camera = Sdk2Camera(sdk2, args.camera_timeout)
+        camera = Sdk2Camera(sdk2, args.sdk2_camera_type, args.camera_timeout)
     elif args.camera_source == "sdk2":
-        camera = Sdk2Camera(sdk2, args.camera_timeout)
+        camera = Sdk2Camera(sdk2, args.sdk2_camera_type, args.camera_timeout)
     else:
         camera = OpenCvCamera(args.camera_index)
 
@@ -581,7 +597,6 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
         camera.close()
         if hasattr(drone, "close"):
             drone.close()
-        cv2.destroyAllWindows()
 
     return 0
 
@@ -604,11 +619,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--takeoff-wait", type=float, default=2.0)
     parser.add_argument("--wait-per-point", type=float, default=3.0)
     parser.add_argument("--camera-source", choices=["opencv", "sdk2", "pioneer-raw"], default="sdk2")
+    parser.add_argument("--sdk2-camera-type", default="OPT")
     parser.add_argument("--camera-timeout", type=float, default=2.0)
     parser.add_argument("--camera-index", type=int, default=0)
     parser.add_argument("--csv", default="orb_ransac_localization.csv")
     parser.add_argument("--debug-dir")
-    parser.add_argument("--show", action="store_true")
+    parser.add_argument("--show", action="store_true", help="Deprecated: ignored on headless/OpenCV-no-GUI builds.")
     parser.add_argument("--no-command-listener", action="store_true")
     parser.add_argument("--no-flight", action="store_true")
     parser.add_argument("--no-flight-seconds", type=float, default=20.0)
@@ -650,6 +666,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--move-timeout and --poll-interval must be positive")
     if args.camera_timeout <= 0:
         raise ValueError("--camera-timeout must be positive")
+    if not args.sdk2_camera_type.strip():
+        raise ValueError("--sdk2-camera-type must not be empty")
     if args.takeoff_wait < 0 or args.wait_per_point <= 0 or args.no_flight_seconds <= 0:
         raise ValueError("wait times must be valid positive values")
     if args.area_size <= 0:

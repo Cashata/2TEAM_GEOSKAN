@@ -205,7 +205,7 @@ names:
 Сбор кадров можно почти полностью автоматизировать скриптом на Mini 2. Дрон сам взлетает, проходит сетку точек над картой, меняет высоту и yaw, а камера сохраняет JPG-кадры. Для этого нужны:
 
 - `Pioneer` для управления дроном;
-- `Camera` и `CameraType.MAIN` для получения BGR-кадра;
+- `Camera` и `CameraType.OPT` для получения BGR-кадра с нижней/оптической камеры;
 - `ServoCamera`, если нужно повернуть камеру вниз;
 - `go_to_local_point(x, y, z, yaw)` для перехода в точку;
 - `point_reached()` для ожидания достижения waypoint;
@@ -261,7 +261,7 @@ def save_frames(camera, prefix, seconds=3, fps=2):
         time.sleep(delay)
 
 pioneer = Pioneer()
-camera = Camera(camera_type=CameraType.MAIN)
+camera = Camera(camera_type=CameraType.OPT)
 
 # Если сервопривод камеры доступен, направляем камеру вниз.
 try:

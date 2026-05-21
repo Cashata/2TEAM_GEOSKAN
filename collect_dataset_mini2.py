@@ -38,6 +38,7 @@ from typing import Iterable
 DEFAULT_OUT_DIR = "/home/geoscan/dataset_landmarks"
 DEFAULT_HEIGHTS = "0.6,0.8,1.0,1.2"
 DEFAULT_YAWS = "0,45,90,135,180,225,270,315"
+DEFAULT_SDK2_CAMERA_TYPE = "OPT"
 
 
 def import_pioneer_sdk2():
@@ -284,14 +285,29 @@ def create_pioneer():
     return sdk2.Pioneer(wait_callback=True, safety_command=True)
 
 
-def create_camera():
+def resolve_sdk2_camera_type(sdk2, camera_type_name: str):
+    camera_type_name = camera_type_name.upper()
+    if hasattr(sdk2.CameraType, camera_type_name):
+        return getattr(sdk2.CameraType, camera_type_name)
+
+    available = sorted(name for name in dir(sdk2.CameraType) if name.isupper())
+    raise RuntimeError(
+        "SDK2 CameraType.{} is unavailable. Available camera types: {}".format(
+            camera_type_name,
+            ", ".join(available) if available else "unknown",
+        )
+    )
+
+
+def create_camera(camera_type_name: str):
     sdk2 = import_pioneer_sdk2()
+    camera_type = resolve_sdk2_camera_type(sdk2, camera_type_name)
 
     try:
-        return sdk2.Camera(camera_type=sdk2.CameraType.MAIN)
+        return sdk2.Camera(camera_type=camera_type)
     except TypeError:
         # Some examples initialize Camera with a positional camera type.
-        return sdk2.Camera(sdk2.CameraType.MAIN)
+        return sdk2.Camera(camera_type)
 
 
 def set_camera_angle(angle: float) -> None:
@@ -328,7 +344,7 @@ def run_mission(args: argparse.Namespace) -> int:
 
     try:
         pioneer = create_pioneer()
-        camera = create_camera()
+        camera = create_camera(args.sdk2_camera_type)
         set_camera_angle(args.camera_angle)
 
         print("Arming...")
@@ -418,6 +434,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--settle-time", type=float, default=0.5)
     parser.add_argument("--takeoff-settle", type=float, default=3.0)
     parser.add_argument("--camera-angle", type=float, default=-90.0)
+    parser.add_argument("--sdk2-camera-type", default=DEFAULT_SDK2_CAMERA_TYPE)
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -435,6 +452,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--move-timeout must be positive")
     if args.camera_angle < -90 or args.camera_angle > 30:
         raise ValueError("--camera-angle must be in [-90, 30] degrees")
+    if not args.sdk2_camera_type.strip():
+        raise ValueError("--sdk2-camera-type must not be empty")
 
     for height in args.heights:
         if height <= 0:
