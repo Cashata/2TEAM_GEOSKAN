@@ -604,11 +604,13 @@ def result_row(
     camera_type: str,
     target_point: tuple[float, float, float],
     yaw: float,
+    phase: str,
 ) -> dict[str, object]:
     row = asdict(result)
     row["timestamp"] = time.time()
     row["point_index"] = point_index
     row["frame_id"] = frame_id
+    row["phase"] = phase
     row["camera_type"] = camera_type
     row["height"] = target_point[2]
     row["yaw"] = yaw
@@ -726,6 +728,109 @@ class FlightVideoLogger:
             self.map_writer.release()
 
 
+class ContinuousFlightRecorder:
+    def __init__(
+        self,
+        camera,
+        localizer: OrbRansacLocalizer,
+        video_logger: FlightVideoLogger,
+        csv_path: str | None,
+        debug_dir: str | None,
+        camera_type: str,
+        yaw: float,
+        stop_event: threading.Event,
+    ) -> None:
+        self.camera = camera
+        self.localizer = localizer
+        self.video_logger = video_logger
+        self.csv_path = csv_path
+        self.debug_dir = debug_dir
+        self.camera_type = camera_type
+        self.stop_event = stop_event
+        self.lock = threading.Lock()
+        self.thread: threading.Thread | None = None
+        self.frame_id = 0
+        self.error: Exception | None = None
+        self.point_index = 0
+        self.target_point = (0.0, 0.0, 0.0)
+        self.yaw = yaw
+        self.phase = "preflight"
+        self.reset_tracking = True
+
+    def set_context(
+        self,
+        point_index: int,
+        target_point: tuple[float, float, float],
+        yaw: float,
+        phase: str,
+        reset_tracking: bool = False,
+    ) -> None:
+        with self.lock:
+            self.point_index = point_index
+            self.target_point = target_point
+            self.yaw = yaw
+            self.phase = phase
+            if reset_tracking:
+                self.reset_tracking = True
+
+    def start(self) -> None:
+        self.thread = threading.Thread(target=self.run, daemon=True)
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+
+    def join(self) -> None:
+        if self.thread is not None:
+            self.thread.join()
+
+    def raise_if_failed(self) -> None:
+        if self.error is not None:
+            raise RuntimeError("Continuous flight recorder failed: {}".format(self.error)) from self.error
+
+    def snapshot_context(self) -> tuple[int, tuple[float, float, float], float, str, bool]:
+        with self.lock:
+            context = (self.point_index, self.target_point, self.yaw, self.phase, self.reset_tracking)
+            self.reset_tracking = False
+            return context
+
+    def run(self) -> None:
+        try:
+            while not self.stop_event.is_set():
+                point_index, target_point, yaw, phase, reset_tracking = self.snapshot_context()
+                if reset_tracking:
+                    self.localizer.start_waypoint()
+
+                frame = self.camera.read()
+                if frame is None:
+                    print("camera frame is empty", file=sys.stderr)
+                    time.sleep(0.05)
+                    continue
+
+                result, homography, processed_frame = self.localizer.estimate(frame)
+                frame_id = self.frame_id
+                self.frame_id += 1
+
+                row = result_row(point_index, frame_id, result, self.camera_type, target_point, yaw, phase)
+                print(json.dumps(row, ensure_ascii=False))
+                append_csv(self.csv_path, row)
+                self.video_logger.write(processed_frame, result, point_index, frame_id)
+
+                if self.debug_dir:
+                    out = Path(self.debug_dir)
+                    out.mkdir(parents=True, exist_ok=True)
+                    debug = self.localizer.draw_debug(processed_frame, result, homography)
+                    filename = "debug_p{:03d}_f{:06d}.jpg".format(point_index, frame_id)
+                    cv2.imwrite(str(out / filename), debug)
+
+                time.sleep(0.03)
+
+        except Exception as exc:
+            self.error = exc
+            print("ERROR: continuous flight recorder failed: {}".format(exc), file=sys.stderr)
+            self.stop_event.set()
+
+
 def estimate_move_time(
     previous_point: tuple[float, float, float],
     next_point: tuple[float, float, float],
@@ -823,44 +928,12 @@ def wait_for_point(
     return False
 
 
-def process_camera_for_seconds(
-    camera,
-    localizer: OrbRansacLocalizer,
-    video_logger: FlightVideoLogger,
-    seconds: float,
-    point_index: int,
-    csv_path: str | None,
-    debug_dir: str | None,
-    camera_type: str,
-    target_point: tuple[float, float, float],
-    yaw: float,
-    stop_event: threading.Event,
-) -> None:
-    localizer.start_waypoint()
+def sleep_while_recording(seconds: float, recorder: ContinuousFlightRecorder, stop_event: threading.Event) -> None:
     start = time.monotonic()
-    frame_id = 0
-
     while time.monotonic() - start < seconds and not stop_event.is_set():
-        frame = camera.read()
-        if frame is None:
-            print("camera frame is empty", file=sys.stderr)
-            time.sleep(0.05)
-            continue
-
-        result, homography, processed_frame = localizer.estimate(frame)
-        row = result_row(point_index, frame_id, result, camera_type, target_point, yaw)
-        print(json.dumps(row, ensure_ascii=False))
-        append_csv(csv_path, row)
-        video_logger.write(processed_frame, result, point_index, frame_id)
-
-        if debug_dir:
-            out = Path(debug_dir)
-            out.mkdir(parents=True, exist_ok=True)
-            debug = localizer.draw_debug(processed_frame, result, homography)
-            cv2.imwrite(str(out / "debug_p{:03d}_f{:05d}.jpg".format(point_index, frame_id)), debug)
-
-        frame_id += 1
-        time.sleep(0.03)
+        recorder.raise_if_failed()
+        remaining = seconds - (time.monotonic() - start)
+        time.sleep(min(0.1, max(remaining, 0.0)))
 
 
 def fly_local_waypoints(args: argparse.Namespace) -> int:
@@ -902,21 +975,24 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
 
     if args.no_flight:
         camera = OpenCvCamera(args.camera_index)
+        recorder = ContinuousFlightRecorder(
+            camera=camera,
+            localizer=localizer,
+            video_logger=video_logger,
+            csv_path=args.csv,
+            debug_dir=args.debug_dir,
+            camera_type="opencv:{}".format(args.camera_index),
+            yaw=args.yaw,
+            stop_event=stop_event,
+        )
+        recorder.set_context(0, (0.0, 0.0, args.height), args.yaw, "no_flight", reset_tracking=True)
+        recorder.start()
         try:
-            process_camera_for_seconds(
-                camera=camera,
-                localizer=localizer,
-                video_logger=video_logger,
-                seconds=args.no_flight_seconds,
-                point_index=0,
-                csv_path=args.csv,
-                debug_dir=args.debug_dir,
-                camera_type="opencv:{}".format(args.camera_index),
-                target_point=(0.0, 0.0, args.height),
-                yaw=args.yaw,
-                stop_event=stop_event,
-            )
+            sleep_while_recording(args.no_flight_seconds, recorder, stop_event)
+            recorder.raise_if_failed()
         finally:
+            recorder.stop()
+            recorder.join()
             camera.close()
             video_logger.close()
         return 0
@@ -934,6 +1010,22 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
         camera = OpenCvCamera(args.camera_index)
         camera_type = "opencv:{}".format(args.camera_index)
 
+    recorder = ContinuousFlightRecorder(
+        camera=camera,
+        localizer=localizer,
+        video_logger=video_logger,
+        csv_path=args.csv,
+        debug_dir=args.debug_dir,
+        camera_type=camera_type,
+        yaw=args.yaw,
+        stop_event=stop_event,
+    )
+    recorder.set_context(0, (0.0, 0.0, 0.0), args.yaw, "preflight", reset_tracking=True)
+    recorder.start()
+
+    is_armed = False
+    flight_started = False
+
     try:
         check_battery_or_abort(
             drone=drone,
@@ -941,18 +1033,25 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
             retries=args.battery_check_retries,
             retry_delay=args.battery_check_delay,
         )
+        recorder.raise_if_failed()
 
+        recorder.set_context(0, (0.0, 0.0, 0.0), args.yaw, "arm")
         print("Arming...")
         if hasattr(drone, "arm"):
             armed = drone.arm(timeout=5, retries=1)
             if armed is False:
                 raise RuntimeError("pioneer.arm() returned False")
+            is_armed = True
+        recorder.raise_if_failed()
 
+        recorder.set_context(0, (0.0, 0.0, args.height), args.yaw, "takeoff", reset_tracking=True)
         print("Takeoff...")
         takeoff = drone.takeoff()
         if takeoff is False:
             raise RuntimeError("pioneer.takeoff() returned False")
-        time.sleep(args.takeoff_wait)
+        flight_started = True
+        recorder.set_context(0, (0.0, 0.0, args.height), args.yaw, "takeoff_wait")
+        sleep_while_recording(args.takeoff_wait, recorder, stop_event)
 
         previous_point = (0.0, 0.0, 0.0)
         for point_index, (x, y, z) in enumerate(waypoints, 1):
@@ -963,6 +1062,7 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
             print("Point {}: x={} y={} z={}".format(point_index, x, y, z))
             next_point = (x, y, z)
             point_time = args.point_time or estimate_move_time(previous_point, next_point, args.speed)
+            recorder.set_context(point_index, next_point, args.yaw, "move", reset_tracking=True)
             command_local_point(drone, x, y, z, yaw=args.yaw, point_time=point_time)
 
             reached = wait_for_point(
@@ -971,50 +1071,58 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
                 poll_interval=args.poll_interval,
                 stop_event=stop_event,
             )
+            recorder.raise_if_failed()
             if not reached and not stop_event.is_set():
                 print("WARNING: waypoint {} was not confirmed before timeout".format(point_index), file=sys.stderr)
             if not stop_event.is_set() and args.settle_time > 0:
-                time.sleep(args.settle_time)
+                recorder.set_context(point_index, next_point, args.yaw, "settle")
+                sleep_while_recording(args.settle_time, recorder, stop_event)
 
-            process_camera_for_seconds(
-                camera=camera,
-                localizer=localizer,
-                video_logger=video_logger,
-                seconds=args.wait_per_point,
-                point_index=point_index,
-                csv_path=args.csv,
-                debug_dir=args.debug_dir,
-                camera_type=camera_type,
-                target_point=next_point,
-                yaw=args.yaw,
-                stop_event=stop_event,
-            )
+            recorder.set_context(point_index, next_point, args.yaw, "hold")
+            sleep_while_recording(args.wait_per_point, recorder, stop_event)
             previous_point = next_point
 
+        recorder.set_context(len(waypoints) + 1, previous_point, args.yaw, "landing")
         print("Landing...")
         drone.land()
+        flight_started = False
+        if args.landing_record_time > 0:
+            recorder.set_context(len(waypoints) + 1, previous_point, args.yaw, "landed")
+            sleep_while_recording(args.landing_record_time, recorder, stop_event)
 
         if hasattr(drone, "disarm"):
+            recorder.set_context(len(waypoints) + 1, previous_point, args.yaw, "disarm")
             print("Disarming...")
             drone.disarm()
 
     except KeyboardInterrupt:
         print("Interrupted. Landing...")
-        if hasattr(drone, "land"):
+        if flight_started and hasattr(drone, "land"):
+            recorder.set_context(0, (0.0, 0.0, 0.0), args.yaw, "interrupt_landing")
             drone.land()
+        elif is_armed and hasattr(drone, "disarm"):
+            recorder.set_context(0, (0.0, 0.0, 0.0), args.yaw, "interrupt_disarm")
+            drone.disarm()
         return 130
 
     except Exception as exc:
         print("Error: {}".format(exc), file=sys.stderr)
-        if hasattr(drone, "land"):
+        if flight_started and hasattr(drone, "land"):
             print("Landing after error...")
             try:
+                recorder.set_context(0, (0.0, 0.0, 0.0), args.yaw, "error_landing")
                 drone.land()
             except Exception as land_exc:
                 print("Landing failed: {}".format(land_exc), file=sys.stderr)
+        elif is_armed and hasattr(drone, "disarm"):
+            print("Disarming after preflight/takeoff error...")
+            recorder.set_context(0, (0.0, 0.0, 0.0), args.yaw, "error_disarm")
+            drone.disarm()
         return 1
 
     finally:
+        recorder.stop()
+        recorder.join()
         camera.close()
         video_logger.close()
 
@@ -1050,6 +1158,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--takeoff-wait", type=float, default=2.0)
     parser.add_argument("--wait-per-point", type=float, default=3.0)
     parser.add_argument("--settle-time", type=float, default=1.5)
+    parser.add_argument("--landing-record-time", type=float, default=3.0)
     parser.add_argument("--camera-source", choices=["opencv", "sdk2", "pioneer-raw"], default="sdk2")
     parser.add_argument("--sdk2-camera-type", default="OPT")
     parser.add_argument("--camera-timeout", type=float, default=2.0)
@@ -1122,6 +1231,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--move-timeout and --poll-interval must be positive")
     if args.settle_time < 0:
         raise ValueError("--settle-time must be >= 0")
+    if args.landing_record_time < 0:
+        raise ValueError("--landing-record-time must be >= 0")
     if args.camera_timeout <= 0:
         raise ValueError("--camera-timeout must be positive")
     if args.min_battery_voltage < 0:
