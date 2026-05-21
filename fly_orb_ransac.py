@@ -227,8 +227,8 @@ class Sdk2Camera:
         return self.camera.get_cv_frame(timeout=self.timeout)
 
     def close(self) -> None:
-        if hasattr(self.camera, "stop"):
-            self.camera.stop()
+        if hasattr(self.camera, "close"):
+            self.camera.close()
 
 
 def import_pioneer_sdk2():
@@ -442,7 +442,6 @@ def process_camera_for_seconds(
     seconds: float,
     point_index: int,
     csv_path: str | None,
-    show: bool,
     debug_dir: str | None,
     stop_event: threading.Event,
 ) -> None:
@@ -501,7 +500,6 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
                 seconds=args.no_flight_seconds,
                 point_index=0,
                 csv_path=args.csv,
-                show=args.show,
                 debug_dir=args.debug_dir,
                 stop_event=stop_event,
             )
@@ -558,7 +556,6 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
                 seconds=args.wait_per_point,
                 point_index=point_index,
                 csv_path=args.csv,
-                show=args.show,
                 debug_dir=args.debug_dir,
                 stop_event=stop_event,
             )
@@ -585,18 +582,10 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
                 drone.land()
             except Exception as land_exc:
                 print("Landing failed: {}".format(land_exc), file=sys.stderr)
-                if hasattr(drone, "emergency_stop"):
-                    print("Emergency stop...")
-                    drone.emergency_stop()
-        elif hasattr(drone, "emergency_stop"):
-            print("Emergency stop...")
-            drone.emergency_stop()
         return 1
 
     finally:
         camera.close()
-        if hasattr(drone, "close"):
-            drone.close()
 
     return 0
 
