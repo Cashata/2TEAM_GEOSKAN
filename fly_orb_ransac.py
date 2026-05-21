@@ -745,6 +745,61 @@ def command_local_point(drone, x: float, y: float, z: float, yaw: float, point_t
         print("WARNING: go_to_local_point returned False", file=sys.stderr)
 
 
+def parse_battery_status(status) -> tuple[float, float] | None:
+    if status is None:
+        return None
+
+    if isinstance(status, dict):
+        voltage = status.get("voltage", status.get("battery_voltage"))
+        temperature = status.get("temperature", status.get("battery_temperature"))
+    elif isinstance(status, (list, tuple)) and len(status) >= 2:
+        voltage, temperature = status[0], status[1]
+    else:
+        return None
+
+    try:
+        return float(voltage), float(temperature)
+    except (TypeError, ValueError):
+        return None
+
+
+def check_battery_or_abort(
+    drone,
+    min_voltage: float,
+    retries: int,
+    retry_delay: float,
+) -> None:
+    if min_voltage <= 0:
+        print("Battery voltage check disabled")
+        return
+
+    if not hasattr(drone, "get_battery_status"):
+        print("WARNING: get_battery_status() unavailable")
+        return
+
+    parsed_status = None
+    last_status = None
+    for attempt in range(1, retries + 1):
+        last_status = drone.get_battery_status()
+        print("Battery status attempt {}/{}: {}".format(attempt, retries, last_status))
+        parsed_status = parse_battery_status(last_status)
+        if parsed_status is not None:
+            break
+        if attempt < retries and retry_delay > 0:
+            time.sleep(retry_delay)
+
+    if parsed_status is None:
+        raise RuntimeError("Cannot read battery status: {}".format(last_status))
+
+    voltage, temperature = parsed_status
+    print("Battery voltage={:.2f} V, temperature={:.1f} C".format(voltage, temperature))
+
+    if voltage < min_voltage:
+        raise RuntimeError(
+            "Battery voltage too low for flight: {:.2f} V < {:.2f} V".format(voltage, min_voltage)
+        )
+
+
 def wait_for_point(
     drone,
     timeout: float,
@@ -880,6 +935,13 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
         camera_type = "opencv:{}".format(args.camera_index)
 
     try:
+        check_battery_or_abort(
+            drone=drone,
+            min_voltage=args.min_battery_voltage,
+            retries=args.battery_check_retries,
+            retry_delay=args.battery_check_delay,
+        )
+
         print("Arming...")
         if hasattr(drone, "arm"):
             armed = drone.arm(timeout=5, retries=1)
@@ -992,6 +1054,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sdk2-camera-type", default="OPT")
     parser.add_argument("--camera-timeout", type=float, default=2.0)
     parser.add_argument("--camera-index", type=int, default=0)
+    parser.add_argument("--min-battery-voltage", type=float, default=7.4)
+    parser.add_argument("--battery-check-retries", type=int, default=3)
+    parser.add_argument("--battery-check-delay", type=float, default=0.5)
     parser.add_argument("--csv", default="orb_ransac_localization.csv")
     parser.add_argument("--debug-dir")
     parser.add_argument("--video-camera-out", default="camera_overlay.avi")
@@ -1059,6 +1124,12 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--settle-time must be >= 0")
     if args.camera_timeout <= 0:
         raise ValueError("--camera-timeout must be positive")
+    if args.min_battery_voltage < 0:
+        raise ValueError("--min-battery-voltage must be >= 0")
+    if args.battery_check_retries <= 0:
+        raise ValueError("--battery-check-retries must be positive")
+    if args.battery_check_delay < 0:
+        raise ValueError("--battery-check-delay must be >= 0")
     if args.video_fps <= 0:
         raise ValueError("--video-fps must be positive")
     if not args.sdk2_camera_type.strip():
