@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import importlib
 import json
 import math
 import os
@@ -37,6 +38,25 @@ from typing import Iterable
 DEFAULT_OUT_DIR = "/home/geoscan/dataset_landmarks"
 DEFAULT_HEIGHTS = "0.6,0.8,1.0,1.2"
 DEFAULT_YAWS = "0,45,90,135,180,225,270,315"
+
+
+def import_pioneer_sdk2():
+    """Import Pioneer-SDK2 only when a real flight is started.
+
+    Pioneer-SDK2 is already available in Pioneer OS on Mini 2. Installing it
+    into a Windows/PyCharm interpreter is optional for local editing and often
+    fails while building native dependencies. Use --dry-run locally instead.
+    """
+    try:
+        return importlib.import_module("pioneer_sdk2")
+    except ModuleNotFoundError as exc:
+        if exc.name != "pioneer_sdk2":
+            raise
+        raise RuntimeError(
+            "pioneer_sdk2 is not installed in this Python environment. "
+            "Run this script on Pioneer Mini 2 / Pioneer OS, where SDK2 is "
+            "preinstalled, or use --dry-run on a local PC to preview the route."
+        ) from exc
 
 
 @dataclass(frozen=True)
@@ -258,27 +278,27 @@ def save_frames(cv2, camera, session_dir: Path, pose: Pose, frames_per_pose: int
 
 
 def create_pioneer():
-    from pioneer_sdk2 import Pioneer
+    sdk2 = import_pioneer_sdk2()
 
     # Defaults are wait_callback=True and safety_command=True in SDK2 docs.
-    return Pioneer(wait_callback=True, safety_command=True)
+    return sdk2.Pioneer(wait_callback=True, safety_command=True)
 
 
 def create_camera():
-    from pioneer_sdk2 import Camera, CameraType
+    sdk2 = import_pioneer_sdk2()
 
     try:
-        return Camera(camera_type=CameraType.MAIN)
+        return sdk2.Camera(camera_type=sdk2.CameraType.MAIN)
     except TypeError:
         # Some examples initialize Camera with a positional camera type.
-        return Camera(CameraType.MAIN)
+        return sdk2.Camera(sdk2.CameraType.MAIN)
 
 
 def set_camera_angle(angle: float) -> None:
     try:
-        from pioneer_sdk2 import ServoCamera
+        sdk2 = import_pioneer_sdk2()
 
-        servo = ServoCamera()
+        servo = sdk2.ServoCamera()
         servo.set_angle(angle)
         print(f"Camera servo angle set to {angle} degrees")
     except Exception as exc:
