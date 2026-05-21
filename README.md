@@ -156,15 +156,18 @@ YOLO обучается находить устойчивые ориентиры
 
 ## Датасет для YOLO landmarks
 
-Датасет нужен, но для такой карты можно начать с 200-500 кадров, снятых с камеры Mini 2. После первых тестов стоит доразмечать ошибки модели.
+Датасет для `YOLO landmarks` нужен не для чтения ID ArUco, а для надежного поиска устойчивых объектов карты: углов, базы, запретных зон, зон поиска, перекрестков и кандидатов целей. YOLO в этой схеме отвечает за вопрос "где на изображении находится объект карты", а точную идентификацию цели лучше оставлять OpenCV ArUco.
 
-Снимать нужно разные условия:
+Для старта можно вручную собрать и разметить 200-500 кадров. Но если запустить автосбор с Mini 2 по разным высотам, позициям и yaw, реально получить 500-1500 кадров без ручной съемки. После первой версии модели обычно нужно доразметить только ошибки: плохой свет, смаз, частичную видимость, тени и похожие элементы ландшафта.
 
-- высоты: 0.5 / 0.8 / 1.0 / 1.2 м;
-- разные yaw-углы;
+Снимать нужно не "красивые" кадры, а разные условия, в которых модель потом будет работать:
+
+- высоты: 0.6 / 0.8 / 1.0 / 1.2 м;
+- разные yaw-углы: 0 / 45 / 90 / 135 / 180 / 225 / 270 / 315 градусов;
 - разный свет;
 - частичная видимость карты;
 - кадры с ArUco и без ArUco;
+- кадры, где видна только часть no-fly зоны или базы;
 - кадры с тенями, руками, другими дронами и визуальными помехами.
 
 Структура датасета для YOLO:
@@ -199,19 +202,252 @@ names:
 
 ## Автоматизация сбора датасета
 
-Сбор кадров можно автоматизировать скриптом на Mini 2: дрон сам проходит точки на разных высотах и yaw, а камера сохраняет кадры. Это уменьшает ручную работу при съемке.
+Сбор кадров можно почти полностью автоматизировать скриптом на Mini 2. Дрон сам взлетает, проходит сетку точек над картой, меняет высоту и yaw, а камера сохраняет JPG-кадры. Для этого нужны:
 
-Разметку тоже можно частично автоматизировать, если на углы карты положить служебные ArUco с известными ID, например 10, 11, 12, 13. Скрипт находит эти ArUco, строит homography и проецирует заранее известные координаты объектов карты в пиксели, генерируя YOLO-labels.
+- `Pioneer` для управления дроном;
+- `Camera` и `CameraType.MAIN` для получения BGR-кадра;
+- `ServoCamera`, если нужно повернуть камеру вниз;
+- `go_to_local_point(x, y, z, yaw)` для перехода в точку;
+- `point_reached()` для ожидания достижения waypoint;
+- `Camera.get_cv_frame()` для получения кадра;
+- `cv2.imwrite()` для сохранения JPG.
 
-Практичный план:
+Сохранять лучше сразу изображения, а не только видео: для YOLO все равно нужны пары `image + label`, а кадры из автополета проще сразу складывать в `images_raw`.
+
+Пример скрипта автосъемки:
+
+```python
+import os
+import time
+import cv2
+from pioneer_sdk2 import Pioneer, Camera, CameraType, ServoCamera
+
+OUT_DIR = "/home/geoscan/dataset_landmarks/images_raw"
+os.makedirs(OUT_DIR, exist_ok=True)
+
+# Точки задаются относительно места взлета.
+HEIGHTS = [0.6, 0.8, 1.0, 1.2]
+YAWS = [0, 45, 90, 135, 180, 225, 270, 315]
+
+XY_POINTS = [
+    (0.0, 0.0),
+    (0.5, 0.0),
+    (-0.5, 0.0),
+    (0.0, 0.5),
+    (0.0, -0.5),
+    (0.5, 0.5),
+    (-0.5, 0.5),
+    (0.5, -0.5),
+    (-0.5, -0.5),
+]
+
+def wait_point(pioneer, timeout=10):
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        if pioneer.point_reached():
+            return True
+        time.sleep(0.1)
+    return False
+
+def save_frames(camera, prefix, seconds=3, fps=2):
+    delay = 1.0 / fps
+    n = int(seconds * fps)
+
+    for i in range(n):
+        frame = camera.get_cv_frame(timeout=2.0)
+        if frame is not None:
+            path = f"{OUT_DIR}/{prefix}_{i:03d}.jpg"
+            cv2.imwrite(path, frame)
+        time.sleep(delay)
+
+pioneer = Pioneer()
+camera = Camera(camera_type=CameraType.MAIN)
+
+# Если сервопривод камеры доступен, направляем камеру вниз.
+try:
+    servo = ServoCamera()
+    servo.set_angle(-90)
+except Exception as e:
+    print("ServoCamera недоступна или не настроена:", e)
+
+try:
+    pioneer.arm()
+    pioneer.takeoff()
+
+    idx = 0
+    for z in HEIGHTS:
+        for x, y in XY_POINTS:
+            for yaw in YAWS:
+                pioneer.go_to_local_point(x=x, y=y, z=z, yaw=yaw)
+                wait_point(pioneer, timeout=12)
+                time.sleep(0.5)
+
+                prefix = f"z{z:.1f}_x{x:.1f}_y{y:.1f}_yaw{yaw:03d}_{idx:05d}"
+                save_frames(camera, prefix, seconds=2, fps=2)
+                idx += 1
+
+    pioneer.land()
+
+except KeyboardInterrupt:
+    print("Остановлено вручную, посадка")
+    pioneer.land()
+
+finally:
+    camera.stop()
+```
+
+Такой маршрут дает:
+
+- 4 высоты;
+- 9 позиций вокруг точки взлета;
+- 8 yaw-углов;
+- несколько кадров в каждой точке.
+
+Даже при 2 секундах съемки и 2 FPS получается больше тысячи изображений. Потом их можно разложить на `train/val`, разметить руками или прогнать через авторазметку ниже.
+
+### Авторазметка через ArUco-углы карты
+
+Для карты 3 x 3 м полезно автоматизировать не только съемку, но и большую часть разметки. Идея такая:
+
+```text
+служебные ArUco по углам карты
+  -> cv2.aruco.detectMarkers()
+  -> homography: координаты карты 3 x 3 м -> пиксели кадра
+  -> известные LANDMARKS в метрах
+  -> pixel boxes
+  -> YOLO .txt labels
+```
+
+На 4 угла карты кладутся служебные ArUco, например ID `10`, `11`, `12`, `13`. Они не являются целями миссии и нужны только для автосбора датасета. OpenCV ArUco находит их в кадре, `cv2.findHomography()` строит преобразование из координат карты в пиксели, а заранее заданные объекты карты проецируются в bounding boxes.
+
+Пример объектов карты в метрах:
+
+```python
+LANDMARKS = [
+    # class_id, x_min, y_min, x_max, y_max на карте 3 x 3 м
+    (0, 0.00, 0.00, 0.15, 0.15),  # corner_tl
+    (1, 2.85, 0.00, 3.00, 0.15),  # corner_tr
+    (2, 2.85, 2.85, 3.00, 3.00),  # corner_br
+    (3, 0.00, 2.85, 0.15, 3.00),  # corner_bl
+    (4, 0.20, 0.20, 0.55, 0.55),  # base
+    (5, 1.20, 1.00, 1.80, 1.60),  # no_fly_zone
+]
+```
+
+Пример генерации YOLO-labels:
+
+```python
+import cv2
+import numpy as np
+
+MAP_CORNERS_M = {
+    10: (0.0, 0.0),
+    11: (3.0, 0.0),
+    12: (3.0, 3.0),
+    13: (0.0, 3.0),
+}
+
+def yolo_line_from_pixel_box(class_id, x1, y1, x2, y2, W, H):
+    x1, x2 = sorted([x1, x2])
+    y1, y2 = sorted([y1, y2])
+
+    x1 = max(0, min(W - 1, x1))
+    x2 = max(0, min(W - 1, x2))
+    y1 = max(0, min(H - 1, y1))
+    y2 = max(0, min(H - 1, y2))
+
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    xc = ((x1 + x2) / 2) / W
+    yc = ((y1 + y2) / 2) / H
+    bw = (x2 - x1) / W
+    bh = (y2 - y1) / H
+
+    return f"{class_id} {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f}"
+
+def project_box(H_map_to_img, box_m):
+    class_id, x1, y1, x2, y2 = box_m
+    pts = np.float32([
+        [x1, y1],
+        [x2, y1],
+        [x2, y2],
+        [x1, y2],
+    ]).reshape(-1, 1, 2)
+
+    pix = cv2.perspectiveTransform(pts, H_map_to_img).reshape(-1, 2)
+    px1, py1 = pix.min(axis=0)
+    px2, py2 = pix.max(axis=0)
+
+    return class_id, px1, py1, px2, py2
+
+def make_labels_for_frame(frame, landmarks):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_250)
+    detector = cv2.aruco.ArucoDetector(aruco_dict)
+    corners, ids, _ = detector.detectMarkers(gray)
+
+    if ids is None:
+        return None
+
+    img_pts = []
+    map_pts = []
+
+    for c, marker_id in zip(corners, ids.flatten()):
+        if marker_id in MAP_CORNERS_M:
+            center_px = c[0].mean(axis=0)
+            img_pts.append(center_px)
+            map_pts.append(MAP_CORNERS_M[marker_id])
+
+    if len(img_pts) < 4:
+        return None
+
+    H_map_to_img, _ = cv2.findHomography(
+        np.float32(map_pts),
+        np.float32(img_pts),
+    )
+
+    if H_map_to_img is None:
+        return None
+
+    H_img, W_img = frame.shape[:2]
+    labels = []
+
+    for box_m in landmarks:
+        class_id, px1, py1, px2, py2 = project_box(H_map_to_img, box_m)
+        label = yolo_line_from_pixel_box(
+            class_id,
+            px1,
+            py1,
+            px2,
+            py2,
+            W_img,
+            H_img,
+        )
+        if label is not None:
+            labels.append(label)
+
+    return labels
+```
+
+YOLO-строка имеет стандартный формат:
+
+```text
+class_id x_center y_center width height
+```
+
+Все координаты нормализуются от 0 до 1 относительно ширины и высоты изображения. После авторазметки нужно обязательно просмотреть часть результата: если один из угловых ArUco найден неправильно или кадр слишком смазан, labels лучше удалить или поправить вручную.
+
+Практичный пайплайн:
 
 1. Наклеить 4 служебных ArUco по углам карты.
-2. Автоматически снять кадры на разных высотах и yaw.
+2. Запустить автополет на разных высотах и yaw.
 3. Сохранять сразу JPG-кадры.
 4. Авторазметить landmarks через homography.
 5. Проверить руками 10-15% кадров.
 6. Удалить или поправить ошибочные кадры.
 7. Обучить YOLO landmarks.
+8. Конвертировать модель в `.rknn` и загрузить на Mini 2.
 
 ## Обучение и перенос на Mini 2
 
