@@ -26,6 +26,7 @@ import importlib
 import json
 import math
 import sys
+import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -40,6 +41,8 @@ DEFAULT_WAYPOINTS = [
     (0.0, 1.0, 1.5),
     (0.0, 0.0, 1.0),
 ]
+
+LAND_COMMANDS = {"land", "stop", "q", "quit", "exit", "посадка", "сесть", "стоп"}
 
 
 @dataclass
@@ -229,6 +232,99 @@ def parse_waypoint(value: str) -> tuple[float, float, float]:
     return parts[0], parts[1], parts[2]
 
 
+def parse_float_list(value: str) -> list[float]:
+    parts = [float(part.strip()) for part in value.split(",") if part.strip()]
+    if not parts:
+        raise argparse.ArgumentTypeError("list must contain at least one number")
+    return parts
+
+
+def linspace(start: float, stop: float, count: int) -> list[float]:
+    if count <= 0:
+        raise ValueError("count must be positive")
+    if count == 1:
+        return [(start + stop) / 2.0]
+    step = (stop - start) / (count - 1)
+    return [start + step * i for i in range(count)]
+
+
+def build_lawnmower_points(area_size: float, margin: float, grid_size: int, height: float) -> list[tuple[float, float, float]]:
+    lo = -area_size / 2.0 + margin
+    hi = area_size / 2.0 - margin
+    xs = linspace(lo, hi, grid_size)
+    ys = linspace(lo, hi, grid_size)
+
+    points = []
+    for row, y in enumerate(ys):
+        row_xs = xs if row % 2 == 0 else list(reversed(xs))
+        for x in row_xs:
+            points.append((round(x, 3), round(y, 3), height))
+    return points
+
+
+def build_square_points(area_size: float, margin: float, height: float) -> list[tuple[float, float, float]]:
+    lo = -area_size / 2.0 + margin
+    hi = area_size / 2.0 - margin
+    return [
+        (lo, lo, height),
+        (hi, lo, height),
+        (hi, hi, height),
+        (lo, hi, height),
+        (lo, lo, height),
+    ]
+
+
+def resolve_waypoints(args: argparse.Namespace) -> list[tuple[float, float, float]]:
+    if args.waypoint:
+        return args.waypoint
+
+    if args.trajectory == "waypoints":
+        return list(DEFAULT_WAYPOINTS)
+
+    if args.trajectory == "square":
+        return build_square_points(args.area_size, args.margin, args.height)
+
+    if args.trajectory == "lawnmower":
+        return build_lawnmower_points(args.area_size, args.margin, args.grid_size, args.height)
+
+    if args.trajectory == "cube":
+        points = []
+        layers = args.layers or [args.height, args.high_height]
+        for layer_index, height in enumerate(layers):
+            layer = build_lawnmower_points(args.area_size, args.margin, args.grid_size, height)
+            if layer_index % 2:
+                layer = list(reversed(layer))
+            points.extend(layer)
+        return points
+
+    raise ValueError("unknown trajectory: {}".format(args.trajectory))
+
+
+def start_command_listener(stop_event: threading.Event) -> threading.Thread:
+    def listen() -> None:
+        print("Type 'land', 'stop', 'q', 'посадка' or 'сесть' + Enter for graceful landing.")
+        while not stop_event.is_set():
+            try:
+                line = sys.stdin.readline()
+            except OSError:
+                return
+            if line == "":
+                return
+
+            command = line.strip().lower()
+            if not command:
+                continue
+            if command in LAND_COMMANDS:
+                print("Graceful landing requested by command: {}".format(command))
+                stop_event.set()
+                return
+            print("Unknown command '{}'. Use: {}".format(command, ", ".join(sorted(LAND_COMMANDS))))
+
+    thread = threading.Thread(target=listen, daemon=True)
+    thread.start()
+    return thread
+
+
 def append_csv(path: str | None, row: dict[str, object]) -> None:
     if not path:
         return
@@ -273,11 +369,12 @@ def process_camera_for_seconds(
     csv_path: str | None,
     show: bool,
     debug_dir: str | None,
+    stop_event: threading.Event,
 ) -> None:
     start = time.monotonic()
     frame_id = 0
 
-    while time.monotonic() - start < seconds:
+    while time.monotonic() - start < seconds and not stop_event.is_set():
         frame = camera.read()
         if frame is None:
             print("camera frame is empty", file=sys.stderr)
@@ -302,6 +399,7 @@ def process_camera_for_seconds(
             cv2.imshow("map_debug", debug)
             if cv2.waitKey(1) == 27:
                 print("ESC pressed, stopping camera loop")
+                stop_event.set()
                 break
 
         frame_id += 1
@@ -320,6 +418,12 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
         ransac_threshold=args.ransac_threshold,
     )
 
+    stop_event = threading.Event()
+    if not args.no_command_listener:
+        start_command_listener(stop_event)
+
+    waypoints = resolve_waypoints(args)
+
     if args.no_flight:
         camera = OpenCvCamera(args.camera_index)
         try:
@@ -331,6 +435,7 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
                 csv_path=args.csv,
                 show=args.show,
                 debug_dir=args.debug_dir,
+                stop_event=stop_event,
             )
         finally:
             camera.close()
@@ -350,7 +455,11 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
         drone.takeoff()
         time.sleep(args.takeoff_wait)
 
-        for point_index, (x, y, z) in enumerate(args.waypoint, 1):
+        for point_index, (x, y, z) in enumerate(waypoints, 1):
+            if stop_event.is_set():
+                print("Route interrupted before point {}. Landing...".format(point_index))
+                break
+
             print("Point {}: x={} y={} z={}".format(point_index, x, y, z))
             command_local_point(drone, x, y, z, speed=args.speed, yaw=args.yaw)
 
@@ -362,6 +471,7 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
                 csv_path=args.csv,
                 show=args.show,
                 debug_dir=args.debug_dir,
+                stop_event=stop_event,
             )
 
         print("Landing...")
@@ -379,12 +489,18 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
 
     except Exception as exc:
         print("Error: {}".format(exc), file=sys.stderr)
-        if hasattr(drone, "emergency_stop"):
+        if hasattr(drone, "land"):
+            print("Landing after error...")
+            try:
+                drone.land()
+            except Exception as land_exc:
+                print("Landing failed: {}".format(land_exc), file=sys.stderr)
+                if hasattr(drone, "emergency_stop"):
+                    print("Emergency stop...")
+                    drone.emergency_stop()
+        elif hasattr(drone, "emergency_stop"):
             print("Emergency stop...")
             drone.emergency_stop()
-        elif hasattr(drone, "land"):
-            print("Landing after error...")
-            drone.land()
         return 1
 
     finally:
@@ -415,8 +531,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--csv", default="orb_ransac_localization.csv")
     parser.add_argument("--debug-dir")
     parser.add_argument("--show", action="store_true")
+    parser.add_argument("--no-command-listener", action="store_true")
     parser.add_argument("--no-flight", action="store_true")
     parser.add_argument("--no-flight-seconds", type=float, default=20.0)
+    parser.add_argument("--trajectory", choices=["waypoints", "square", "lawnmower", "cube"], default="waypoints")
+    parser.add_argument("--area-size", type=float, default=3.0)
+    parser.add_argument("--margin", type=float, default=0.25)
+    parser.add_argument("--grid-size", type=int, default=3)
+    parser.add_argument("--height", type=float, default=1.0)
+    parser.add_argument("--high-height", type=float, default=1.5)
+    parser.add_argument("--layers", type=parse_float_list)
     parser.add_argument(
         "--waypoint",
         action="append",
@@ -444,7 +568,18 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--speed must be positive")
     if args.takeoff_wait < 0 or args.wait_per_point <= 0 or args.no_flight_seconds <= 0:
         raise ValueError("wait times must be valid positive values")
-    for waypoint in args.waypoint:
+    if args.area_size <= 0:
+        raise ValueError("--area-size must be positive")
+    if args.margin < 0 or args.margin * 2 >= args.area_size:
+        raise ValueError("--margin must be non-negative and smaller than half of --area-size")
+    if args.grid_size <= 0:
+        raise ValueError("--grid-size must be positive")
+    if args.height <= 0 or args.high_height <= 0:
+        raise ValueError("--height and --high-height must be positive")
+    if args.layers and any(layer <= 0 for layer in args.layers):
+        raise ValueError("--layers values must be positive")
+    waypoints = resolve_waypoints(args)
+    for waypoint in waypoints:
         if any(not math.isfinite(value) for value in waypoint):
             raise ValueError("waypoint values must be finite numbers")
 
@@ -452,8 +587,6 @@ def validate_args(args: argparse.Namespace) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.waypoint is None:
-        args.waypoint = list(DEFAULT_WAYPOINTS)
     try:
         validate_args(args)
     except ValueError as exc:
