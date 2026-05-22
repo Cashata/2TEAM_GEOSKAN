@@ -324,6 +324,10 @@ class ContinuousFlightRecorder:
 
                 frame = self.camera.read()
                 if frame is None:
+                    if getattr(self.camera, "finished", False):
+                        print("video input ended")
+                        self.stop_event.set()
+                        break
                     print("camera frame is empty", file=sys.stderr)
                     time.sleep(0.05)
                     continue

@@ -21,6 +21,27 @@ class OpenCvCamera:
         self.cap.release()
 
 
+class VideoFileCamera:
+    def __init__(self, video_path: str) -> None:
+        self.video_path = video_path
+        self.cap = cv2.VideoCapture(video_path)
+        if not self.cap.isOpened():
+            raise RuntimeError("Cannot open video file: {}".format(video_path))
+        self.finished = False
+
+    def read(self) -> np.ndarray | None:
+        if self.finished:
+            return None
+        ok, frame = self.cap.read()
+        if ok:
+            return frame
+        self.finished = True
+        return None
+
+    def close(self) -> None:
+        self.cap.release()
+
+
 class Sdk2Camera:
     def __init__(self, sdk2, camera_type_name: str, timeout: float) -> None:
         camera_type = resolve_sdk2_camera_type(sdk2, camera_type_name)

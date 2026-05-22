@@ -1,6 +1,6 @@
 """Flight control and camera adapters."""
 
-from .camera import OpenCvCamera, Sdk2Camera, resolve_sdk2_camera_type
+from .camera import OpenCvCamera, Sdk2Camera, VideoFileCamera, resolve_sdk2_camera_type
 from .control import (
     LAND_COMMANDS,
     check_battery_or_abort,
@@ -18,6 +18,7 @@ from .control import (
 __all__ = [
     "OpenCvCamera",
     "Sdk2Camera",
+    "VideoFileCamera",
     "resolve_sdk2_camera_type",
     "LAND_COMMANDS",
     "check_battery_or_abort",

@@ -2,7 +2,7 @@
 """Compatibility wrapper for the modular Geoscan mission flight CLI."""
 
 from geoscan_mission.cli.fly_orb_ransac import build_parser, fly_local_waypoints, main, validate_args
-from geoscan_mission.flight.camera import OpenCvCamera, Sdk2Camera, resolve_sdk2_camera_type
+from geoscan_mission.flight.camera import OpenCvCamera, Sdk2Camera, VideoFileCamera, resolve_sdk2_camera_type
 from geoscan_mission.flight.control import (
     LAND_COMMANDS,
     check_battery_or_abort,

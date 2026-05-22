@@ -8,7 +8,7 @@ import math
 import sys
 import threading
 
-from geoscan_mission.flight.camera import OpenCvCamera, Sdk2Camera
+from geoscan_mission.flight.camera import OpenCvCamera, Sdk2Camera, VideoFileCamera
 from geoscan_mission.flight.control import (
     check_battery_or_abort,
     command_local_point,
@@ -65,14 +65,19 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
     waypoints = resolve_waypoints(args)
 
     if args.no_flight:
-        camera = OpenCvCamera(args.camera_index)
+        if args.input_video:
+            camera = VideoFileCamera(args.input_video)
+            camera_type = "video:{}".format(args.input_video)
+        else:
+            camera = OpenCvCamera(args.camera_index)
+            camera_type = "opencv:{}".format(args.camera_index)
         recorder = ContinuousFlightRecorder(
             camera=camera,
             localizer=localizer,
             video_logger=video_logger,
             csv_path=args.csv,
             debug_dir=args.debug_dir,
-            camera_type="opencv:{}".format(args.camera_index),
+            camera_type=camera_type,
             yaw=args.yaw,
             stop_event=stop_event,
             aruco_detector=aruco_detector,
@@ -256,6 +261,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sdk2-camera-type", default="OPT")
     parser.add_argument("--camera-timeout", type=float, default=2.0)
     parser.add_argument("--camera-index", type=int, default=0)
+    parser.add_argument("--input-video", help="Replay a drone video file in --no-flight mode.")
     parser.add_argument("--min-battery-voltage", type=float, default=7.4)
     parser.add_argument("--battery-check-retries", type=int, default=3)
     parser.add_argument("--battery-check-delay", type=float, default=0.5)
@@ -330,6 +336,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--landing-record-time must be >= 0")
     if args.camera_timeout <= 0:
         raise ValueError("--camera-timeout must be positive")
+    if args.input_video and not args.no_flight:
+        raise ValueError("--input-video can only be used with --no-flight")
     if args.min_battery_voltage < 0:
         raise ValueError("--min-battery-voltage must be >= 0")
     if args.battery_check_retries <= 0:
