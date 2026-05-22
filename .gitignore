@@ -7,3 +7,5 @@ debug/
 out/
 dataset_landmarks/
 repomix-output*.md
+calibration_frames/
+calibration_debug/

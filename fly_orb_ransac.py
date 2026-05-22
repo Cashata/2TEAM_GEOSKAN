@@ -2,7 +2,7 @@
 """Compatibility wrapper for the modular Geoscan mission flight CLI."""
 
 from geoscan_mission.cli.fly_orb_ransac import build_parser, fly_local_waypoints, main, validate_args
-from geoscan_mission.flight.camera import OpenCvCamera, Sdk2Camera, VideoFileCamera, resolve_sdk2_camera_type
+from geoscan_mission.flight.camera import OpenCvCamera, Sdk2Camera, UndistortedCamera, VideoFileCamera, resolve_sdk2_camera_type
 from geoscan_mission.flight.control import (
     FlightCommandState,
     LAND_COMMANDS,
@@ -40,6 +40,7 @@ from geoscan_mission.trajectory.patterns import (
     resolve_waypoints,
 )
 from geoscan_mission.vision.aruco import ArucoDetector, ArucoMarker, DEFAULT_DICTIONARY
+from geoscan_mission.vision.calibration import CameraCalibration, load_camera_calibration
 from geoscan_mission.vision.localization import LocalizeResult, OrbRansacLocalizer
 
 

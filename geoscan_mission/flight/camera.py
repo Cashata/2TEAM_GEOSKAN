@@ -55,8 +55,11 @@ class Sdk2Camera:
         return self.camera.get_cv_frame(timeout=self.timeout)
 
     def close(self) -> None:
-        if hasattr(self.camera, "close"):
-            self.camera.close()
+        for method_name in ("close", "stop"):
+            method = getattr(self.camera, method_name, None)
+            if callable(method):
+                method()
+                return
 
 
 def resolve_sdk2_camera_type(sdk2, camera_type_name: str):
@@ -71,3 +74,22 @@ def resolve_sdk2_camera_type(sdk2, camera_type_name: str):
             ", ".join(available) if available else "unknown",
         )
     )
+
+
+class UndistortedCamera:
+    def __init__(self, camera, calibration) -> None:
+        self.camera = camera
+        self.calibration = calibration
+
+    @property
+    def finished(self) -> bool:
+        return bool(getattr(self.camera, "finished", False))
+
+    def read(self) -> np.ndarray | None:
+        frame = self.camera.read()
+        if frame is None:
+            return None
+        return self.calibration.undistort(frame)
+
+    def close(self) -> None:
+        self.camera.close()

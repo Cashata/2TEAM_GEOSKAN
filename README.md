@@ -38,6 +38,26 @@ python fly_orb_ransac.py --no-flight --reference map.jpg --camera-index 0 --aruc
 python3 fly_orb_ransac.py --reference map.jpg --camera-source sdk2 --sdk2-camera-type OPT --aruco
 ```
 
+Калибровка камеры Mini 2 без GUI на борту:
+
+```bash
+python3 calibration.py --camera-source sdk2 --sdk2-camera-type OPT --max-frames 30 --capture-interval 1.0 --output data.yml --frames-dir calibration_frames --debug-dir calibration_debug
+```
+
+По умолчанию ожидается шахматная доска `6 x 9` внутренних углов; если распечатка другая, задайте `--board-cols` и `--board-rows`.
+
+После этого основной сценарий можно запускать с выпрямлением кадра:
+
+```bash
+python3 fly_orb_ransac.py --reference map.jpg --camera-source sdk2 --sdk2-camera-type OPT --calibration data.yml --aruco
+```
+
+Если кадры уже собраны, пересчитать коэффициенты можно без дрона:
+
+```bash
+python calibration.py --images calibration_frames --glob "*.jpg" --output data.yml --debug-dir calibration_debug
+```
+
 Экспериментальный режим ручного управления скоростью:
 
 ```bash

@@ -8,7 +8,7 @@ import math
 import sys
 import threading
 
-from geoscan_mission.flight.camera import OpenCvCamera, Sdk2Camera, VideoFileCamera
+from geoscan_mission.flight.camera import OpenCvCamera, Sdk2Camera, UndistortedCamera, VideoFileCamera
 from geoscan_mission.flight.control import (
     FlightCommandState,
     check_battery_or_abort,
@@ -29,7 +29,26 @@ from geoscan_mission.flight.trajectory_control import (
 from geoscan_mission.recording import ContinuousFlightRecorder, FlightVideoLogger
 from geoscan_mission.trajectory.patterns import parse_float_list, parse_waypoint, resolve_waypoints
 from geoscan_mission.vision.aruco import ArucoDetector, DEFAULT_DICTIONARY
+from geoscan_mission.vision.calibration import load_camera_calibration
 from geoscan_mission.vision.localization import OrbRansacLocalizer
+
+
+def maybe_undistort_camera(camera, args: argparse.Namespace):
+    if not args.calibration:
+        return camera
+
+    calibration = load_camera_calibration(args.calibration, alpha=args.calibration_alpha)
+    image_size = "unknown"
+    if calibration.image_size is not None:
+        image_size = "{}x{}".format(calibration.image_size[0], calibration.image_size[1])
+    print(
+        "Loaded camera calibration from {} (image size {}, alpha={:.2f})".format(
+            args.calibration,
+            image_size,
+            args.calibration_alpha,
+        )
+    )
+    return UndistortedCamera(camera, calibration)
 
 
 def fly_local_waypoints(args: argparse.Namespace) -> int:
@@ -78,6 +97,9 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
         else:
             camera = OpenCvCamera(args.camera_index)
             camera_type = "opencv:{}".format(args.camera_index)
+        camera = maybe_undistort_camera(camera, args)
+        if args.calibration:
+            camera_type += "+undistorted"
         recorder = ContinuousFlightRecorder(
             camera=camera,
             localizer=localizer,
@@ -113,6 +135,9 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
     else:
         camera = OpenCvCamera(args.camera_index)
         camera_type = "opencv:{}".format(args.camera_index)
+    camera = maybe_undistort_camera(camera, args)
+    if args.calibration:
+        camera_type += "+undistorted"
 
     recorder = ContinuousFlightRecorder(
         camera=camera,
@@ -312,6 +337,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--camera-timeout", type=float, default=2.0)
     parser.add_argument("--camera-index", type=int, default=0)
     parser.add_argument("--input-video", help="Replay a drone video file in --no-flight mode.")
+    parser.add_argument("--calibration", help="OpenCV YAML calibration file; frames are undistorted before vision.")
+    parser.add_argument("--calibration-alpha", type=float, default=0.0, help="Undistort crop factor in [0, 1].")
     parser.add_argument("--min-battery-voltage", type=float, default=7.4)
     parser.add_argument("--battery-check-retries", type=int, default=3)
     parser.add_argument("--battery-check-delay", type=float, default=0.5)
@@ -388,6 +415,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--camera-timeout must be positive")
     if args.input_video and not args.no_flight:
         raise ValueError("--input-video can only be used with --no-flight")
+    if not (0.0 <= args.calibration_alpha <= 1.0):
+        raise ValueError("--calibration-alpha must be between 0 and 1")
     if args.min_battery_voltage < 0:
         raise ValueError("--min-battery-voltage must be >= 0")
     if args.battery_check_retries <= 0:
