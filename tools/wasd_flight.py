@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import sys
 import time
 from pathlib import Path
@@ -20,6 +21,49 @@ from geoscan_mission.flight.control import (
     import_pioneer_sdk2,
     return_to_launch_or_land,
 )
+
+
+class TerminalKeyReader:
+    """Non-blocking single-key reader for SSH terminal control."""
+
+    def __enter__(self):
+        if sys.platform == "win32":
+            import msvcrt
+
+            self.msvcrt = msvcrt
+            return self
+
+        import termios
+        import tty
+
+        self.termios = termios
+        self.fd = sys.stdin.fileno()
+        self.old_settings = termios.tcgetattr(self.fd)
+        tty.setcbreak(self.fd)
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if sys.platform != "win32":
+            self.termios.tcsetattr(self.fd, self.termios.TCSADRAIN, self.old_settings)
+
+    def read_key(self) -> int:
+        if sys.platform == "win32":
+            if not self.msvcrt.kbhit():
+                return -1
+            key = self.msvcrt.getwch()
+        else:
+            import select
+
+            ready, _, _ = select.select([sys.stdin], [], [], 0)
+            if not ready:
+                return -1
+            key = sys.stdin.read(1)
+
+        if key == "\x1b":
+            return 27
+        if not key:
+            return -1
+        return ord(key.lower())
 
 
 def send_manual_speed(drone, vx: float, vy: float, vz: float, yaw_rate: float, interval: float) -> None:
@@ -159,8 +203,14 @@ def run_control(args: argparse.Namespace) -> int:
     command = "hold"
     video_path = resolve_video_path(args)
     video_writer = None
+    show_window = not args.no_window and not args.terminal_control
 
-    cv2.namedWindow(args.window_name, cv2.WINDOW_NORMAL)
+    if show_window:
+        cv2.namedWindow(args.window_name, cv2.WINDOW_NORMAL)
+    if args.terminal_control:
+        print("Terminal WASD mode. Keys: 1 arm, 3 takeoff, WASD/IJK/QE move, Space hold, 4 land, R rtl, X exit.")
+
+    key_reader_context = TerminalKeyReader() if args.terminal_control else nullcontext(None)
 
     try:
         if args.takeoff_on_start:
@@ -171,93 +221,103 @@ def run_control(args: argparse.Namespace) -> int:
             status = "airborne"
             time.sleep(args.takeoff_wait)
 
-        while True:
-            frame = read_camera_frame(camera)
-            frame = draw_hud(cv2, np, frame, status, command, args)
-            if video_path is not None:
-                if video_writer is None:
-                    video_writer = create_video_writer(cv2, video_path, frame, args.video_fps)
-                    print("Recording WASD video to {}".format(video_path))
-                video_writer.write(frame)
-            cv2.imshow(args.window_name, frame)
+        with key_reader_context as key_reader:
+            while True:
+                frame = read_camera_frame(camera)
+                frame = draw_hud(cv2, np, frame, status, command, args)
+                if video_path is not None:
+                    if video_writer is None:
+                        video_writer = create_video_writer(cv2, video_path, frame, args.video_fps)
+                        print("Recording WASD video to {}".format(video_path))
+                    video_writer.write(frame)
 
-            key = cv2.waitKey(max(1, int(args.loop_interval * 1000)))
-            if key != -1:
-                key &= 0xFF
+                if show_window:
+                    cv2.imshow(args.window_name, frame)
+                    key = cv2.waitKey(max(1, int(args.loop_interval * 1000)))
+                    if key != -1:
+                        key &= 0xFF
+                else:
+                    time.sleep(args.loop_interval)
+                    key = key_reader.read_key() if key_reader is not None else -1
 
-            command = "hold"
-            if key == -1:
-                if flight_started:
+                command = "hold"
+                if key == -1:
+                    if flight_started:
+                        safe_hold(drone, args.command_interval)
+                    continue
+
+                if key in (27, ord("x")):
+                    status = "landing"
+                    command = "land+exit"
+                    safe_land(drone, args.command_interval)
+                    flight_started = False
+                    break
+                if key == ord(" "):
                     safe_hold(drone, args.command_interval)
-                continue
-
-            if key in (27, ord("x")):
-                status = "landing"
-                command = "land+exit"
-                safe_land(drone, args.command_interval)
-                flight_started = False
-                break
-            if key == ord(" "):
-                safe_hold(drone, args.command_interval)
-                command = "hold stop"
-                continue
-            if key == ord("1"):
-                arm_drone(drone)
-                is_armed = True
-                status = "armed"
-                command = "arm"
-                continue
-            if key == ord("2"):
-                safe_hold(drone, args.command_interval)
-                if hasattr(drone, "disarm"):
-                    drone.disarm()
-                is_armed = False
-                flight_started = False
-                status = "disarmed"
-                command = "disarm"
-                continue
-            if key == ord("3"):
-                if not is_armed:
+                    command = "hold stop"
+                    continue
+                if key == ord("1"):
                     arm_drone(drone)
                     is_armed = True
-                takeoff_drone(drone)
-                flight_started = True
-                status = "airborne"
-                command = "takeoff"
-                time.sleep(args.takeoff_wait)
-                continue
-            if key == ord("4"):
-                status = "landing"
-                command = "land"
-                safe_land(drone, args.command_interval)
-                flight_started = False
-                continue
-            if key == ord("r"):
-                status = "rtl"
-                command = "rtl"
-                return_to_launch_or_land(
-                    drone=drone,
-                    height=args.rtl_height,
-                    yaw=0.0,
-                    point_time=args.point_time,
-                    timeout=args.move_timeout,
-                    poll_interval=args.poll_interval,
-                )
-                flight_started = False
-                break
-
-            movement = movement_for_key(key, args)
-            if movement is None:
-                if flight_started:
+                    status = "armed"
+                    command = "arm"
+                    print(command)
+                    continue
+                if key == ord("2"):
                     safe_hold(drone, args.command_interval)
-                command = "unknown key"
-                continue
+                    if hasattr(drone, "disarm"):
+                        drone.disarm()
+                    is_armed = False
+                    flight_started = False
+                    status = "disarmed"
+                    command = "disarm"
+                    print(command)
+                    continue
+                if key == ord("3"):
+                    if not is_armed:
+                        arm_drone(drone)
+                        is_armed = True
+                    takeoff_drone(drone)
+                    flight_started = True
+                    status = "airborne"
+                    command = "takeoff"
+                    print(command)
+                    time.sleep(args.takeoff_wait)
+                    continue
+                if key == ord("4"):
+                    status = "landing"
+                    command = "land"
+                    print(command)
+                    safe_land(drone, args.command_interval)
+                    flight_started = False
+                    continue
+                if key == ord("r"):
+                    status = "rtl"
+                    command = "rtl"
+                    print(command)
+                    return_to_launch_or_land(
+                        drone=drone,
+                        height=args.rtl_height,
+                        yaw=0.0,
+                        point_time=args.point_time,
+                        timeout=args.move_timeout,
+                        poll_interval=args.poll_interval,
+                    )
+                    flight_started = False
+                    break
 
-            vx, vy, vz, yaw_rate, command = movement
-            if flight_started:
-                send_manual_speed(drone, vx, vy, vz, yaw_rate, args.command_interval)
-            else:
-                command = "{} ignored before takeoff".format(command)
+                movement = movement_for_key(key, args)
+                if movement is None:
+                    if flight_started:
+                        safe_hold(drone, args.command_interval)
+                    command = "unknown key"
+                    continue
+
+                vx, vy, vz, yaw_rate, command = movement
+                if flight_started:
+                    send_manual_speed(drone, vx, vy, vz, yaw_rate, args.command_interval)
+                else:
+                    command = "{} ignored before takeoff".format(command)
 
     except KeyboardInterrupt:
         print("Interrupted. Landing...", file=sys.stderr)
@@ -276,7 +336,8 @@ def run_control(args: argparse.Namespace) -> int:
         if video_writer is not None:
             video_writer.release()
             print("Saved WASD video: {}".format(video_path))
-        cv2.destroyAllWindows()
+        if show_window:
+            cv2.destroyAllWindows()
         if hasattr(drone, "close_connection"):
             drone.close_connection()
 
@@ -305,6 +366,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--video-out", default="wasd_flight_{timestamp}.avi")
     parser.add_argument("--video-fps", type=float, default=20.0)
     parser.add_argument("--no-video", action="store_true")
+    parser.add_argument("--terminal-control", action="store_true", help="Read keys from SSH/terminal instead of OpenCV window.")
+    parser.add_argument("--no-window", action="store_true", help="Do not create an OpenCV control window.")
     parser.add_argument("--window-name", default="pioneer_wasd_control")
     return parser
 
