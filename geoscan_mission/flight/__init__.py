@@ -2,17 +2,28 @@
 
 from .camera import OpenCvCamera, Sdk2Camera, VideoFileCamera, resolve_sdk2_camera_type
 from .control import (
+    FlightCommandState,
     LAND_COMMANDS,
+    RTL_COMMANDS,
+    call_builtin_rtl,
     check_battery_or_abort,
     command_local_point,
     create_pioneer,
     estimate_move_time,
     import_pioneer_sdk2,
     parse_battery_status,
+    return_to_launch_or_land,
     sleep_while_recording,
     start_command_listener,
     wait_for_point,
     warn_show_disabled,
+)
+from .trajectory_control import (
+    DroneController,
+    ManualSpeedControllerConfig,
+    ManualSpeedTrajectoryController,
+    PIDController,
+    transform_global_to_body_fixed,
 )
 
 __all__ = [
@@ -20,15 +31,24 @@ __all__ = [
     "Sdk2Camera",
     "VideoFileCamera",
     "resolve_sdk2_camera_type",
+    "FlightCommandState",
     "LAND_COMMANDS",
+    "RTL_COMMANDS",
+    "call_builtin_rtl",
     "check_battery_or_abort",
     "command_local_point",
     "create_pioneer",
     "estimate_move_time",
     "import_pioneer_sdk2",
     "parse_battery_status",
+    "return_to_launch_or_land",
     "sleep_while_recording",
     "start_command_listener",
     "wait_for_point",
     "warn_show_disabled",
+    "DroneController",
+    "ManualSpeedControllerConfig",
+    "ManualSpeedTrajectoryController",
+    "PIDController",
+    "transform_global_to_body_fixed",
 ]

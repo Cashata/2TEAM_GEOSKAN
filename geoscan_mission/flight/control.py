@@ -10,6 +10,17 @@ import threading
 import time
 
 
+RTL_COMMANDS = {
+    "rtl",
+    "rth",
+    "return",
+    "return_home",
+    "return-to-home",
+    "return_to_home",
+    "return-to-launch",
+    "return_to_launch",
+}
+
 LAND_COMMANDS = {
     "land",
     "stop",
@@ -22,6 +33,28 @@ LAND_COMMANDS = {
     "сесть",
     "стоп",
 }
+
+
+class FlightCommandState:
+    """Thread-safe storage for the last requested console flight action."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._action: str | None = None
+        self._command: str | None = None
+
+    def request(self, action: str, command: str) -> None:
+        with self._lock:
+            self._action = action
+            self._command = command
+
+    def get_action(self) -> str | None:
+        with self._lock:
+            return self._action
+
+    def get_command(self) -> str | None:
+        with self._lock:
+            return self._command
 
 
 def import_pioneer_sdk2():
@@ -52,9 +85,12 @@ def warn_show_disabled(show: bool) -> None:
         )
 
 
-def start_command_listener(stop_event: threading.Event) -> threading.Thread:
+def start_command_listener(
+    stop_event: threading.Event,
+    command_state: FlightCommandState | None = None,
+) -> threading.Thread:
     def listen() -> None:
-        print("Type 'land', 'stop', 'q', 'posadka' or 'sest' + Enter for graceful landing.")
+        print("Type 'rtl', 'land', 'stop', 'q', 'posadka' or 'sest' + Enter to stop the route safely.")
         while not stop_event.is_set():
             try:
                 line = sys.stdin.readline()
@@ -66,11 +102,20 @@ def start_command_listener(stop_event: threading.Event) -> threading.Thread:
             command = line.strip().lower()
             if not command:
                 continue
+            if command in RTL_COMMANDS:
+                if command_state is not None:
+                    command_state.request("rtl", command)
+                print("Return-to-launch requested by command: {}".format(command))
+                stop_event.set()
+                return
             if command in LAND_COMMANDS:
+                if command_state is not None:
+                    command_state.request("land", command)
                 print("Graceful landing requested by command: {}".format(command))
                 stop_event.set()
                 return
-            print("Unknown command '{}'. Use: {}".format(command, ", ".join(sorted(LAND_COMMANDS))))
+            commands = sorted(RTL_COMMANDS | LAND_COMMANDS)
+            print("Unknown command '{}'. Use: {}".format(command, ", ".join(commands)))
 
     thread = threading.Thread(target=listen, daemon=True)
     thread.start()
@@ -171,6 +216,48 @@ def wait_for_point(
             break
         time.sleep(poll_interval)
 
+    return False
+
+
+def call_builtin_rtl(drone) -> bool:
+    for method_name in ("rtl", "return_to_launch", "return_to_home"):
+        method = getattr(drone, method_name, None)
+        if not callable(method):
+            continue
+
+        result = method()
+        if result is False:
+            raise RuntimeError("{}() returned False".format(method_name))
+        print("Sent return-to-launch command via {}().".format(method_name))
+        return True
+    return False
+
+
+def return_to_launch_or_land(
+    drone,
+    height: float,
+    yaw: float,
+    point_time: int,
+    timeout: float,
+    poll_interval: float,
+) -> bool:
+    """Run SDK RTL when available, otherwise return to local origin and land."""
+
+    if call_builtin_rtl(drone):
+        return True
+
+    print("WARNING: no rtl() method found; falling back to x=0 y=0 return and landing.", file=sys.stderr)
+    if hasattr(drone, "go_to_local_point"):
+        command_local_point(drone, 0.0, 0.0, max(height, 0.1), yaw=yaw, point_time=point_time)
+        wait_for_point(
+            drone=drone,
+            timeout=timeout,
+            poll_interval=poll_interval,
+            stop_event=threading.Event(),
+        )
+
+    if hasattr(drone, "land"):
+        drone.land()
     return False
 
 

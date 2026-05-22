@@ -54,3 +54,12 @@ class SmoothPath:
         u_new = np.linspace(0, 1, num_points)
         x, y = splev(u_new, tck)
         self.path = np.column_stack((x, y))
+
+
+def create_trajectory_from_grid(cost_map, start_node, end_node, smooth=True, s=50, k=2, num_points=20):
+    path_finder = PathFinder(cost_map)
+    path = path_finder.find_path(start_node, end_node)
+
+    if smooth and len(path) > 2:
+        return SmoothPath(path, s=s, k=k, num_points=num_points).path
+    return path

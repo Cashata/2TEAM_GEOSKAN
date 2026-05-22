@@ -1,6 +1,6 @@
 """Trajectory generation and grid path planning helpers."""
 
-from .grid_path import PathFinder, SmoothPath
+from .grid_path import PathFinder, SmoothPath, create_trajectory_from_grid
 from .patterns import (
     DEFAULT_WAYPOINTS,
     build_lawnmower_points,
@@ -17,6 +17,7 @@ __all__ = [
     "SmoothPath",
     "build_lawnmower_points",
     "build_square_points",
+    "create_trajectory_from_grid",
     "linspace",
     "parse_float_list",
     "parse_waypoint",

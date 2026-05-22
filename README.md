@@ -9,6 +9,7 @@
 | `fly_orb_ransac.py` | Совместимая CLI-обертка основного сценария. |
 | `geoscan_mission/cli/fly_orb_ransac.py` | Сборка полетного/replay-сценария из модулей. |
 | `geoscan_mission/flight/` | Управление дроном, SDK2/OpenCV/video camera adapters, battery check, waypoint-команды. |
+| `geoscan_mission/flight/trajectory_control.py` | Экспериментальное PID/manual-speed управление через `set_manual_speed_body_fixed`. |
 | `geoscan_mission/vision/localization.py` | ORB/RANSAC-локализация кадра на reference-карте. |
 | `geoscan_mission/vision/aruco.py` | ArUco-детектор целей миссии и накопление найденного слова. |
 | `geoscan_mission/trajectory/` | Паттерны `waypoints`, `square`, `lawnmower`, `cube` и grid path helpers. |
@@ -16,10 +17,12 @@
 | `tools/keypoint_map_localizer.py` | Отдельная утилита для проверки RANSAC-локализации по изображению, видео или камере Mini 2. |
 | `tools/collect_dataset_mini2.py` | Утилита сбора кадров с Mini 2 и dry-run предпросмотра маршрута. |
 | `tools/grid_path_demo.py` | Demo для grid path planning вокруг запретной зоны на карте. |
+| `tools/convert_map_tif.py` | Конвертация большой `*.tif/*.tiff` карты в рабочий `map.jpg`. |
+| `tools/wasd_flight.py` | Ручное WASD-управление Mini 2 через `set_manual_speed_body_fixed`. |
 | `docs/` | Задание и курируемые заметки по полезным источникам/улучшениям. |
 | `aruco` | CLI для проверки ArUco на одном изображении. |
 
-Корневые `fly_orb_ransac.py`, `aruco`, `aruco_detector.py`, `PathFinder.py` и `SmoothPath.py` оставлены как compatibility launchers/re-export, чтобы старые команды и импорты не ломались.
+Корневые `fly_orb_ransac.py`, `aruco`, `aruco_detector.py`, `PathFinder.py`, `SmoothPath.py` и `drone_trajectory_control.py` оставлены как compatibility launchers/re-export, чтобы старые команды и импорты не ломались.
 
 ## Быстрый запуск
 
@@ -33,6 +36,28 @@ python fly_orb_ransac.py --no-flight --reference map.jpg --camera-index 0 --aruc
 
 ```bash
 python3 fly_orb_ransac.py --reference map.jpg --camera-source sdk2 --sdk2-camera-type OPT --aruco
+```
+
+Экспериментальный режим ручного управления скоростью:
+
+```bash
+python3 fly_orb_ransac.py --reference map.jpg --camera-source sdk2 --sdk2-camera-type OPT --trajectory square --area-size 1.0 --margin 0.2 --height 0.8 --speed 0.12 --move-timeout 20 --control-mode manual-speed --aruco
+```
+
+По умолчанию используется `--control-mode autopilot`: SDK сам ведет дрон через `go_to_local_point`. `manual-speed` отправляет частые команды `set_manual_speed_body_fixed`, требует рабочие `get_local_position_lps()` и `get_local_yaw_lps()`, поэтому сначала проверяйте его на маленьком квадрате и низкой скорости.
+
+Во время реального полета консольный listener понимает `rtl` + Enter. Сначала отправляется встроенный SDK RTL (`rtl()`, `return_to_launch()` или `return_to_home()`, если метод есть), иначе используется fallback: возврат в локальную точку `x=0, y=0` на текущей высоте и посадка.
+
+Конвертация карты из TIFF в JPEG:
+
+```bash
+python tools/convert_map_tif.py Карта_Дроно_старт.tif -o map.jpg --max-side 6000
+```
+
+Ручное WASD-управление:
+
+```bash
+python3 tools/wasd_flight.py --speed 0.12 --vertical-speed 0.10 --sdk2-camera-type OPT
 ```
 
 Проверка одного изображения на ArUco:
@@ -113,9 +138,12 @@ python tools/collect_dataset_mini2.py --dry-run
 python fly_orb_ransac.py --reference map.jpg --trajectory lawnmower --grid-size 4 --margin 0.25 --height 1.0 --aruco
 ```
 
+Режим управления выбирается отдельно от формы маршрута: `--control-mode autopilot` для штатного SDK waypoint-полета или `--control-mode manual-speed` для PID-контроллера по локальной позиции LPS.
+
 ## Разделение ответственности
 
 - Менять команды дрона и safety-логику: `geoscan_mission/flight/control.py`.
+- Менять PID/manual-speed движение: `geoscan_mission/flight/trajectory_control.py`.
 - Менять источники кадров: `geoscan_mission/flight/camera.py`.
 - Менять маршруты: `geoscan_mission/trajectory/patterns.py`.
 - Менять ORB/RANSAC фильтры: `geoscan_mission/vision/localization.py`.

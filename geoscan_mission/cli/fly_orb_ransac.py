@@ -10,15 +10,21 @@ import threading
 
 from geoscan_mission.flight.camera import OpenCvCamera, Sdk2Camera, VideoFileCamera
 from geoscan_mission.flight.control import (
+    FlightCommandState,
     check_battery_or_abort,
     command_local_point,
     create_pioneer,
     estimate_move_time,
     import_pioneer_sdk2,
+    return_to_launch_or_land,
     sleep_while_recording,
     start_command_listener,
     wait_for_point,
     warn_show_disabled,
+)
+from geoscan_mission.flight.trajectory_control import (
+    ManualSpeedControllerConfig,
+    ManualSpeedTrajectoryController,
 )
 from geoscan_mission.recording import ContinuousFlightRecorder, FlightVideoLogger
 from geoscan_mission.trajectory.patterns import parse_float_list, parse_waypoint, resolve_waypoints
@@ -59,8 +65,9 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
     aruco_detector = ArucoDetector(dictionary_name=args.aruco_dict) if args.aruco else None
 
     stop_event = threading.Event()
+    command_state = FlightCommandState()
     if not args.no_command_listener:
-        start_command_listener(stop_event)
+        start_command_listener(stop_event, command_state=command_state)
 
     waypoints = resolve_waypoints(args)
 
@@ -121,10 +128,23 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
     recorder.set_context(0, (0.0, 0.0, 0.0), args.yaw, "preflight", reset_tracking=True)
     recorder.start()
 
+    manual_controller = None
     is_armed = False
     flight_started = False
+    allow_disarm = True
 
     try:
+        if args.control_mode == "manual-speed":
+            manual_controller = ManualSpeedTrajectoryController(
+                drone,
+                ManualSpeedControllerConfig(
+                    max_xy_speed=args.speed,
+                    max_z_speed=args.speed,
+                    control_interval=0.05,
+                    command_interval=max(args.poll_interval, 0.05),
+                ),
+            )
+
         check_battery_or_abort(
             drone=drone,
             min_voltage=args.min_battery_voltage,
@@ -154,21 +174,29 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
         previous_point = (0.0, 0.0, 0.0)
         for point_index, (x, y, z) in enumerate(waypoints, 1):
             if stop_event.is_set():
-                print("Route interrupted before point {}. Landing...".format(point_index))
+                action = "RTL..." if command_state.get_action() == "rtl" else "Landing..."
+                print("Route interrupted before point {}. {}".format(point_index, action))
                 break
 
             print("Point {}: x={} y={} z={}".format(point_index, x, y, z))
             next_point = (x, y, z)
             point_time = args.point_time or estimate_move_time(previous_point, next_point, args.speed)
             recorder.set_context(point_index, next_point, args.yaw, "move", reset_tracking=True)
-            command_local_point(drone, x, y, z, yaw=args.yaw, point_time=point_time)
-
-            reached = wait_for_point(
-                drone=drone,
-                timeout=args.move_timeout,
-                poll_interval=args.poll_interval,
-                stop_event=stop_event,
-            )
+            if manual_controller is not None:
+                reached = manual_controller.fly_to_point(
+                    next_point,
+                    timeout=args.move_timeout,
+                    stop_event=stop_event,
+                    recorder=recorder,
+                )
+            else:
+                command_local_point(drone, x, y, z, yaw=args.yaw, point_time=point_time)
+                reached = wait_for_point(
+                    drone=drone,
+                    timeout=args.move_timeout,
+                    poll_interval=args.poll_interval,
+                    stop_event=stop_event,
+                )
             recorder.raise_if_failed()
             if not reached and not stop_event.is_set():
                 print("WARNING: waypoint {} was not confirmed before timeout".format(point_index), file=sys.stderr)
@@ -180,15 +208,31 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
             sleep_while_recording(args.wait_per_point, recorder, stop_event)
             previous_point = next_point
 
-        recorder.set_context(len(waypoints) + 1, previous_point, args.yaw, "landing")
-        print("Landing...")
-        drone.land()
-        flight_started = False
-        if args.landing_record_time > 0:
-            recorder.set_context(len(waypoints) + 1, previous_point, args.yaw, "landed")
-            sleep_while_recording(args.landing_record_time, recorder, stop_event)
+        final_action = command_state.get_action()
+        if final_action == "rtl":
+            recorder.set_context(len(waypoints) + 1, previous_point, args.yaw, "rtl")
+            print("RTL...")
+            rtl_sent = return_to_launch_or_land(
+                drone=drone,
+                height=previous_point[2] or args.height,
+                yaw=args.yaw,
+                point_time=args.point_time
+                or estimate_move_time(previous_point, (0.0, 0.0, previous_point[2]), args.speed),
+                timeout=args.move_timeout,
+                poll_interval=args.poll_interval,
+            )
+            allow_disarm = not rtl_sent
+            flight_started = False
+        else:
+            recorder.set_context(len(waypoints) + 1, previous_point, args.yaw, "landing")
+            print("Landing...")
+            drone.land()
+            flight_started = False
+            if args.landing_record_time > 0:
+                recorder.set_context(len(waypoints) + 1, previous_point, args.yaw, "landed")
+                sleep_while_recording(args.landing_record_time, recorder, stop_event)
 
-        if hasattr(drone, "disarm"):
+        if allow_disarm and hasattr(drone, "disarm"):
             recorder.set_context(len(waypoints) + 1, previous_point, args.yaw, "disarm")
             print("Disarming...")
             drone.disarm()
@@ -249,6 +293,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-position-jump", type=float, default=0.5)
     parser.add_argument("--ema-alpha", type=float, default=0.3)
     parser.add_argument("--speed", type=float, default=0.15)
+    parser.add_argument(
+        "--control-mode",
+        choices=["autopilot", "manual-speed"],
+        default="autopilot",
+        help="autopilot uses go_to_local_point; manual-speed uses closed-loop set_manual_speed_body_fixed.",
+    )
     parser.add_argument("--yaw", type=float, default=0.0)
     parser.add_argument("--point-time", type=int, default=6)
     parser.add_argument("--move-timeout", type=float, default=15.0)
