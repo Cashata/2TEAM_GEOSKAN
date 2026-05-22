@@ -7,7 +7,10 @@ from dataclasses import dataclass
 import math
 import threading
 import time
-from typing import Protocol
+from typing import Protocol, Sequence
+
+
+Point3 = tuple[float, float, float]
 
 
 class RecorderLike(Protocol):
@@ -70,6 +73,23 @@ class ManualSpeedControllerConfig:
     kp_yaw: float = 1.6
     ki_yaw: float = 0.0
     kd_yaw: float = 0.15
+    kp_lateral: float = 1.2
+    trajectory_finish_tolerance: float = 0.12
+
+
+@dataclass(frozen=True)
+class TrajectoryFollowCommand:
+    vx_body: float
+    vy_body: float
+    vz: float
+    yaw_rate: float
+    target_index: int
+    target_point: Point3
+    yaw_target: float
+    yaw_feed_forward: float
+    yaw_error: float
+    lateral_error: float
+    complete: bool
 
 
 def clip(value: float, lo: float, hi: float) -> float:
@@ -98,6 +118,74 @@ def limit_xy_speed(vx: float, vy: float, max_speed: float) -> tuple[float, float
         return vx, vy
     scale = max_speed / norm
     return vx * scale, vy * scale
+
+
+def distance_3d(a: Point3, b: Point3) -> float:
+    return math.sqrt((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2 + (b[2] - a[2]) ** 2)
+
+
+def horizontal_distance(a: Point3, b: Point3) -> float:
+    return math.hypot(b[0] - a[0], b[1] - a[1])
+
+
+def path_length(points: Sequence[Point3]) -> float:
+    return sum(distance_3d(points[index - 1], points[index]) for index in range(1, len(points)))
+
+
+def nearest_future_index(points: Sequence[Point3], position: Point3, start_index: int) -> int:
+    if not points:
+        raise ValueError("trajectory must contain at least one point")
+
+    start_index = min(max(start_index, 0), len(points) - 1)
+    best_index = start_index
+    best_distance = float("inf")
+    px, py, pz = position
+    for index in range(start_index, len(points)):
+        point = points[index]
+        distance = (point[0] - px) ** 2 + (point[1] - py) ** 2 + (point[2] - pz) ** 2
+        if distance < best_distance:
+            best_distance = distance
+            best_index = index
+    return best_index
+
+
+def tangent_yaw(points: Sequence[Point3], index: int) -> float:
+    if len(points) < 2:
+        return 0.0
+
+    index = min(max(index, 0), len(points) - 1)
+    if index == 0:
+        before = points[0]
+        after = points[1]
+    elif index >= len(points) - 1:
+        before = points[-2]
+        after = points[-1]
+    else:
+        before = points[index - 1]
+        after = points[index + 1]
+
+    dx = after[0] - before[0]
+    dy = after[1] - before[1]
+    if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+        return 0.0
+    return math.atan2(dy, dx)
+
+
+def yaw_feed_forward(points: Sequence[Point3], index: int, speed: float) -> float:
+    if len(points) < 3 or speed <= 0:
+        return 0.0
+
+    previous_index = max(0, index - 1)
+    next_index = min(len(points) - 1, index + 1)
+    if previous_index == next_index:
+        return 0.0
+
+    previous_yaw = tangent_yaw(points, previous_index)
+    next_yaw = tangent_yaw(points, next_index)
+    ds = horizontal_distance(points[previous_index], points[next_index])
+    if ds <= 1e-6:
+        return 0.0
+    return normalize_angle_rad(next_yaw - previous_yaw) * speed / ds
 
 
 class ManualSpeedTrajectoryController:
@@ -204,6 +292,111 @@ class ManualSpeedTrajectoryController:
         self.send_manual_speed(vx_body, vy_body, vz_global, yaw_rate)
         return False
 
+    def compute_spline_command(
+        self,
+        points: Sequence[Point3],
+        current_position: Point3,
+        current_yaw: float,
+        speed: float,
+        progress_index: int,
+    ) -> TrajectoryFollowCommand:
+        if len(points) < 2:
+            raise ValueError("spline trajectory requires at least two points")
+        if speed <= 0:
+            raise ValueError("speed must be positive")
+
+        target_index = nearest_future_index(points, current_position, progress_index)
+        target_point = points[target_index]
+        final_point = points[-1]
+        final_distance = distance_3d(current_position, final_point)
+        complete = target_index >= len(points) - 2 and final_distance <= self.config.trajectory_finish_tolerance
+
+        yaw_target = tangent_yaw(points, target_index)
+        to_path_x = target_point[0] - current_position[0]
+        to_path_y = target_point[1] - current_position[1]
+        lateral_error = -to_path_x * math.sin(yaw_target) + to_path_y * math.cos(yaw_target)
+        z_error = target_point[2] - current_position[2]
+        yaw_error = normalize_angle_rad(yaw_target - current_yaw)
+        feed_forward = yaw_feed_forward(points, target_index, speed)
+
+        vx_body = clip(speed, 0.0, self.config.max_xy_speed)
+        vy_body = clip(
+            self.config.kp_lateral * lateral_error,
+            -self.config.max_xy_speed,
+            self.config.max_xy_speed,
+        )
+        vz = clip(self.config.kp_z * z_error, -self.config.max_z_speed, self.config.max_z_speed)
+        yaw_rate = clip(
+            feed_forward + self.config.kp_yaw * yaw_error,
+            -self.config.max_yaw_rate,
+            self.config.max_yaw_rate,
+        )
+
+        if complete:
+            vx_body = 0.0
+            vy_body = 0.0
+            vz = 0.0
+            yaw_rate = 0.0
+
+        return TrajectoryFollowCommand(
+            vx_body=vx_body,
+            vy_body=vy_body,
+            vz=vz,
+            yaw_rate=yaw_rate,
+            target_index=target_index,
+            target_point=target_point,
+            yaw_target=yaw_target,
+            yaw_feed_forward=feed_forward,
+            yaw_error=yaw_error,
+            lateral_error=lateral_error,
+            complete=complete,
+        )
+
+    def follow_spline_trajectory(
+        self,
+        points: Sequence[Point3],
+        speed: float,
+        stop_event: threading.Event,
+        recorder: RecorderLike | None = None,
+        timeout: float | None = None,
+    ) -> bool:
+        if len(points) < 2:
+            raise ValueError("spline trajectory requires at least two points")
+        if speed <= 0:
+            raise ValueError("speed must be positive")
+
+        self.reset()
+        start = time.monotonic()
+        progress_index = 0
+
+        try:
+            while not stop_event.is_set():
+                if timeout is not None and time.monotonic() - start >= timeout:
+                    return False
+                if recorder is not None:
+                    recorder.raise_if_failed()
+
+                current_position = self.get_position()
+                current_yaw = self.get_yaw_rad()
+                command = self.compute_spline_command(
+                    points=points,
+                    current_position=current_position,
+                    current_yaw=current_yaw,
+                    speed=speed,
+                    progress_index=progress_index,
+                )
+                progress_index = max(progress_index, command.target_index)
+
+                if command.complete:
+                    self.hold_stop()
+                    return True
+
+                self.send_manual_speed(command.vx_body, command.vy_body, command.vz, command.yaw_rate)
+                time.sleep(self.config.control_interval)
+            return False
+        finally:
+            self.hold_stop()
+
     def fly_to_point(
         self,
         target: tuple[float, float, float],
@@ -240,7 +433,12 @@ __all__ = [
     "ManualSpeedControllerConfig",
     "ManualSpeedTrajectoryController",
     "PIDController",
+    "TrajectoryFollowCommand",
+    "horizontal_distance",
     "limit_xy_speed",
     "normalize_angle_rad",
+    "path_length",
+    "tangent_yaw",
     "transform_global_to_body_fixed",
+    "yaw_feed_forward",
 ]

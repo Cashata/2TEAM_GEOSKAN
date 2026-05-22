@@ -27,7 +27,12 @@ from geoscan_mission.flight.trajectory_control import (
     ManualSpeedTrajectoryController,
 )
 from geoscan_mission.recording import ContinuousFlightRecorder, FlightVideoLogger
-from geoscan_mission.trajectory.patterns import parse_float_list, parse_waypoint, resolve_waypoints
+from geoscan_mission.trajectory.patterns import (
+    parse_float_list,
+    parse_waypoint,
+    resolve_waypoints,
+    sample_spline_trajectory,
+)
 from geoscan_mission.vision.aruco import ArucoDetector, DEFAULT_DICTIONARY
 from geoscan_mission.vision.calibration import load_camera_calibration
 from geoscan_mission.vision.localization import OrbRansacLocalizer
@@ -196,25 +201,39 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
         recorder.set_context(0, (0.0, 0.0, args.height), args.yaw, "takeoff_wait")
         sleep_while_recording(args.takeoff_wait, recorder, stop_event)
 
-        previous_point = (0.0, 0.0, 0.0)
-        for point_index, (x, y, z) in enumerate(waypoints, 1):
-            if stop_event.is_set():
-                action = "RTL..." if command_state.get_action() == "rtl" else "Landing..."
-                print("Route interrupted before point {}. {}".format(point_index, action))
-                break
-
-            print("Point {}: x={} y={} z={}".format(point_index, x, y, z))
-            next_point = (x, y, z)
-            point_time = args.point_time or estimate_move_time(previous_point, next_point, args.speed)
-            recorder.set_context(point_index, next_point, args.yaw, "move", reset_tracking=True)
-            if manual_controller is not None:
-                reached = manual_controller.fly_to_point(
-                    next_point,
-                    timeout=args.move_timeout,
-                    stop_event=stop_event,
-                    recorder=recorder,
+        previous_point = (0.0, 0.0, args.height)
+        if manual_controller is not None:
+            trajectory_points = sample_spline_trajectory(waypoints, args.trajectory_points)
+            final_point = trajectory_points[-1]
+            print(
+                "Manual spline trajectory: {} waypoints -> {} points".format(
+                    len(waypoints),
+                    len(trajectory_points),
                 )
-            else:
+            )
+            recorder.set_context(1, final_point, args.yaw, "trajectory", reset_tracking=True)
+            reached = manual_controller.follow_spline_trajectory(
+                trajectory_points,
+                speed=args.speed,
+                stop_event=stop_event,
+                recorder=recorder,
+                timeout=None,
+            )
+            recorder.raise_if_failed()
+            if not reached and not stop_event.is_set():
+                print("WARNING: spline trajectory was not confirmed before stop", file=sys.stderr)
+            previous_point = final_point
+        else:
+            for point_index, (x, y, z) in enumerate(waypoints, 1):
+                if stop_event.is_set():
+                    action = "RTL..." if command_state.get_action() == "rtl" else "Landing..."
+                    print("Route interrupted before point {}. {}".format(point_index, action))
+                    break
+
+                print("Point {}: x={} y={} z={}".format(point_index, x, y, z))
+                next_point = (x, y, z)
+                point_time = args.point_time or estimate_move_time(previous_point, next_point, args.speed)
+                recorder.set_context(point_index, next_point, args.yaw, "move", reset_tracking=True)
                 command_local_point(drone, x, y, z, yaw=args.yaw, point_time=point_time)
                 reached = wait_for_point(
                     drone=drone,
@@ -222,16 +241,16 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
                     poll_interval=args.poll_interval,
                     stop_event=stop_event,
                 )
-            recorder.raise_if_failed()
-            if not reached and not stop_event.is_set():
-                print("WARNING: waypoint {} was not confirmed before timeout".format(point_index), file=sys.stderr)
-            if not stop_event.is_set() and args.settle_time > 0:
-                recorder.set_context(point_index, next_point, args.yaw, "settle")
-                sleep_while_recording(args.settle_time, recorder, stop_event)
+                recorder.raise_if_failed()
+                if not reached and not stop_event.is_set():
+                    print("WARNING: waypoint {} was not confirmed before timeout".format(point_index), file=sys.stderr)
+                if not stop_event.is_set() and args.settle_time > 0:
+                    recorder.set_context(point_index, next_point, args.yaw, "settle")
+                    sleep_while_recording(args.settle_time, recorder, stop_event)
 
-            recorder.set_context(point_index, next_point, args.yaw, "hold")
-            sleep_while_recording(args.wait_per_point, recorder, stop_event)
-            previous_point = next_point
+                recorder.set_context(point_index, next_point, args.yaw, "hold")
+                sleep_while_recording(args.wait_per_point, recorder, stop_event)
+                previous_point = next_point
 
         final_action = command_state.get_action()
         if final_action == "rtl":
@@ -354,6 +373,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-flight", action="store_true")
     parser.add_argument("--no-flight-seconds", type=float, default=20.0)
     parser.add_argument("--trajectory", choices=["waypoints", "square", "lawnmower", "cube"], default="waypoints")
+    parser.add_argument("--trajectory-points", type=int, default=5000)
     parser.add_argument("--area-size", type=float, default=3.0)
     parser.add_argument("--margin", type=float, default=0.25)
     parser.add_argument("--grid-size", type=int, default=3)
@@ -433,6 +453,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("wait times must be valid positive values")
     if args.area_size <= 0:
         raise ValueError("--area-size must be positive")
+    if args.trajectory_points <= 1:
+        raise ValueError("--trajectory-points must be greater than 1")
     if args.margin < 0 or args.margin * 2 >= args.area_size:
         raise ValueError("--margin must be non-negative and smaller than half of --area-size")
     if args.grid_size <= 0:

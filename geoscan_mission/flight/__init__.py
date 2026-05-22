@@ -23,6 +23,7 @@ from .trajectory_control import (
     ManualSpeedControllerConfig,
     ManualSpeedTrajectoryController,
     PIDController,
+    TrajectoryFollowCommand,
     transform_global_to_body_fixed,
 )
 
@@ -50,5 +51,6 @@ __all__ = [
     "ManualSpeedControllerConfig",
     "ManualSpeedTrajectoryController",
     "PIDController",
+    "TrajectoryFollowCommand",
     "transform_global_to_body_fixed",
 ]

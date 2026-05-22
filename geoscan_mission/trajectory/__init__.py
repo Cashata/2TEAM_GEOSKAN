@@ -9,6 +9,7 @@ from .patterns import (
     parse_float_list,
     parse_waypoint,
     resolve_waypoints,
+    sample_spline_trajectory,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "parse_float_list",
     "parse_waypoint",
     "resolve_waypoints",
+    "sample_spline_trajectory",
 ]
