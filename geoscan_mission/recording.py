@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import csv
+from datetime import datetime
 import json
 import sys
 import threading
@@ -30,6 +31,72 @@ def append_csv(path: str | None, row: dict[str, object]) -> None:
         if not file_exists:
             writer.writeheader()
         writer.writerow(row)
+
+
+class FlightEventLogger:
+    FIELDNAMES = [
+        "timestamp",
+        "local_time",
+        "elapsed_s",
+        "event",
+        "phase",
+        "message",
+        "point_index",
+        "target_x_m",
+        "target_y_m",
+        "target_z_m",
+        "details_json",
+    ]
+
+    def __init__(self, path: str | None) -> None:
+        self.path = Path(path) if video_path_enabled(path) else None
+        self.start_time = time.monotonic()
+        self.lock = threading.Lock()
+        if self.path is not None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def log(
+        self,
+        event: str,
+        phase: str,
+        message: str,
+        point_index: int | None = None,
+        target_point: tuple[float, float, float] | None = None,
+        details: dict[str, object] | None = None,
+        console: bool = True,
+    ) -> None:
+        timestamp = time.time()
+        row = {
+            "timestamp": timestamp,
+            "local_time": datetime.fromtimestamp(timestamp).isoformat(timespec="milliseconds"),
+            "elapsed_s": round(time.monotonic() - self.start_time, 3),
+            "event": event,
+            "phase": phase,
+            "message": message,
+            "point_index": "" if point_index is None else point_index,
+            "target_x_m": "",
+            "target_y_m": "",
+            "target_z_m": "",
+            "details_json": json.dumps(details or {}, ensure_ascii=False, sort_keys=True),
+        }
+        if target_point is not None:
+            row["target_x_m"] = target_point[0]
+            row["target_y_m"] = target_point[1]
+            row["target_z_m"] = target_point[2]
+
+        if console:
+            print("[EVENT] {phase} {event}: {message}".format(phase=phase, event=event, message=message))
+
+        if self.path is None:
+            return
+
+        with self.lock:
+            file_exists = self.path.exists()
+            with self.path.open("a", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=self.FIELDNAMES)
+                if not file_exists:
+                    writer.writeheader()
+                writer.writerow(row)
 
 
 def result_row(

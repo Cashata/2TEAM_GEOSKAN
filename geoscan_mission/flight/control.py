@@ -88,9 +88,16 @@ def warn_show_disabled(show: bool) -> None:
 def start_command_listener(
     stop_event: threading.Event,
     command_state: FlightCommandState | None = None,
+    event_logger=None,
 ) -> threading.Thread:
     def listen() -> None:
         print("Type 'rtl', 'land', 'stop', 'q', 'posadka' or 'sest' + Enter to stop the route safely.")
+        if event_logger is not None:
+            event_logger.log(
+                "command_listener_start",
+                "preflight",
+                "Console safety command listener started",
+            )
         while not stop_event.is_set():
             try:
                 line = sys.stdin.readline()
@@ -105,12 +112,26 @@ def start_command_listener(
             if command in RTL_COMMANDS:
                 if command_state is not None:
                     command_state.request("rtl", command)
+                if event_logger is not None:
+                    event_logger.log(
+                        "command_requested",
+                        "command",
+                        "Return-to-launch requested from console",
+                        details={"command": command, "action": "rtl"},
+                    )
                 print("Return-to-launch requested by command: {}".format(command))
                 stop_event.set()
                 return
             if command in LAND_COMMANDS:
                 if command_state is not None:
                     command_state.request("land", command)
+                if event_logger is not None:
+                    event_logger.log(
+                        "command_requested",
+                        "command",
+                        "Landing requested from console",
+                        details={"command": command, "action": "land"},
+                    )
                 print("Graceful landing requested by command: {}".format(command))
                 stop_event.set()
                 return

@@ -26,7 +26,7 @@ from geoscan_mission.flight.trajectory_control import (
     ManualSpeedControllerConfig,
     ManualSpeedTrajectoryController,
 )
-from geoscan_mission.recording import ContinuousFlightRecorder, FlightVideoLogger
+from geoscan_mission.recording import ContinuousFlightRecorder, FlightEventLogger, FlightVideoLogger
 from geoscan_mission.trajectory.patterns import (
     parse_float_list,
     parse_waypoint,
@@ -86,20 +86,51 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
         fps=args.video_fps,
         localizer=localizer,
     )
+    event_logger = FlightEventLogger(args.events_log)
+    event_logger.log(
+        "mission_start",
+        "setup",
+        "Mission script started",
+        details={
+            "control_mode": args.control_mode,
+            "camera_source": args.camera_source,
+            "trajectory": args.trajectory,
+            "speed": args.speed,
+            "height": args.height,
+        },
+    )
     aruco_detector = ArucoDetector(dictionary_name=args.aruco_dict) if args.aruco else None
 
     stop_event = threading.Event()
     command_state = FlightCommandState()
     if not args.no_command_listener:
-        start_command_listener(stop_event, command_state=command_state)
+        start_command_listener(stop_event, command_state=command_state, event_logger=event_logger)
 
     waypoints = resolve_waypoints(args)
+    event_logger.log(
+        "route_resolved",
+        "setup",
+        "Route waypoints resolved",
+        details={"waypoints": waypoints, "waypoint_count": len(waypoints)},
+    )
 
     if args.no_flight:
         if args.input_video:
+            event_logger.log(
+                "camera_open_start",
+                "no_flight",
+                "Opening replay video source",
+                details={"input_video": args.input_video},
+            )
             camera = VideoFileCamera(args.input_video)
             camera_type = "video:{}".format(args.input_video)
         else:
+            event_logger.log(
+                "camera_open_start",
+                "no_flight",
+                "Opening OpenCV camera source",
+                details={"camera_index": args.camera_index},
+            )
             camera = OpenCvCamera(args.camera_index)
             camera_type = "opencv:{}".format(args.camera_index)
         camera = maybe_undistort_camera(camera, args)
@@ -117,27 +148,57 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
             aruco_detector=aruco_detector,
         )
         recorder.set_context(0, (0.0, 0.0, args.height), args.yaw, "no_flight", reset_tracking=True)
+        event_logger.log(
+            "recording_start",
+            "no_flight",
+            "Starting no-flight recorder",
+            target_point=(0.0, 0.0, args.height),
+            details={"seconds": args.no_flight_seconds, "camera_type": camera_type},
+        )
         recorder.start()
         try:
             sleep_while_recording(args.no_flight_seconds, recorder, stop_event)
             recorder.raise_if_failed()
+            event_logger.log("recording_complete", "no_flight", "No-flight recording completed")
         finally:
+            event_logger.log("cleanup_start", "no_flight", "Stopping recorder and closing camera")
             recorder.stop()
             recorder.join()
             camera.close()
             video_logger.close()
+            event_logger.log("cleanup_complete", "no_flight", "No-flight cleanup completed")
         return 0
 
+    event_logger.log("sdk_import_start", "preflight", "Importing Pioneer SDK2")
     sdk2 = import_pioneer_sdk2()
+    event_logger.log("drone_create_start", "preflight", "Creating Pioneer object")
     drone = create_pioneer(sdk2)
     if args.camera_source == "pioneer-raw":
         print("WARNING: --camera-source pioneer-raw is deprecated; using SDK2 Camera.get_cv_frame().")
+        event_logger.log(
+            "camera_open_start",
+            "preflight",
+            "Opening deprecated pioneer-raw SDK2 camera",
+            details={"sdk2_camera_type": args.sdk2_camera_type},
+        )
         camera = Sdk2Camera(sdk2, args.sdk2_camera_type, args.camera_timeout)
         camera_type = args.sdk2_camera_type.upper()
     elif args.camera_source == "sdk2":
+        event_logger.log(
+            "camera_open_start",
+            "preflight",
+            "Opening SDK2 camera",
+            details={"sdk2_camera_type": args.sdk2_camera_type},
+        )
         camera = Sdk2Camera(sdk2, args.sdk2_camera_type, args.camera_timeout)
         camera_type = args.sdk2_camera_type.upper()
     else:
+        event_logger.log(
+            "camera_open_start",
+            "preflight",
+            "Opening OpenCV camera source",
+            details={"camera_index": args.camera_index},
+        )
         camera = OpenCvCamera(args.camera_index)
         camera_type = "opencv:{}".format(args.camera_index)
     camera = maybe_undistort_camera(camera, args)
@@ -156,6 +217,13 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
         aruco_detector=aruco_detector,
     )
     recorder.set_context(0, (0.0, 0.0, 0.0), args.yaw, "preflight", reset_tracking=True)
+    event_logger.log(
+        "recording_start",
+        "preflight",
+        "Starting continuous recorder",
+        target_point=(0.0, 0.0, 0.0),
+        details={"camera_type": camera_type},
+    )
     recorder.start()
 
     manual_controller = None
@@ -165,6 +233,12 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
 
     try:
         if args.control_mode == "manual-speed":
+            event_logger.log(
+                "manual_controller_create",
+                "preflight",
+                "Creating manual-speed trajectory controller",
+                details={"speed": args.speed, "poll_interval": args.poll_interval},
+            )
             manual_controller = ManualSpeedTrajectoryController(
                 drone,
                 ManualSpeedControllerConfig(
@@ -175,31 +249,57 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
                 ),
             )
 
+        event_logger.log(
+            "battery_check_start",
+            "preflight",
+            "Checking battery voltage",
+            details={"min_voltage": args.min_battery_voltage},
+        )
         check_battery_or_abort(
             drone=drone,
             min_voltage=args.min_battery_voltage,
             retries=args.battery_check_retries,
             retry_delay=args.battery_check_delay,
         )
+        event_logger.log("battery_check_complete", "preflight", "Battery check passed")
         recorder.raise_if_failed()
 
         recorder.set_context(0, (0.0, 0.0, 0.0), args.yaw, "arm")
+        event_logger.log("arm_start", "arm", "Sending arm command")
         print("Arming...")
         if hasattr(drone, "arm"):
             armed = drone.arm(timeout=5, retries=1)
             if armed is False:
                 raise RuntimeError("pioneer.arm() returned False")
             is_armed = True
+            event_logger.log("arm_complete", "arm", "Drone armed")
+        else:
+            event_logger.log("arm_skipped", "arm", "Drone object has no arm method")
         recorder.raise_if_failed()
 
         recorder.set_context(0, (0.0, 0.0, args.height), args.yaw, "takeoff", reset_tracking=True)
+        event_logger.log(
+            "takeoff_start",
+            "takeoff",
+            "Sending takeoff command",
+            target_point=(0.0, 0.0, args.height),
+        )
         print("Takeoff...")
         takeoff = drone.takeoff()
         if takeoff is False:
             raise RuntimeError("pioneer.takeoff() returned False")
         flight_started = True
+        event_logger.log("takeoff_complete", "takeoff", "Takeoff command accepted")
         recorder.set_context(0, (0.0, 0.0, args.height), args.yaw, "takeoff_wait")
+        event_logger.log(
+            "takeoff_wait_start",
+            "takeoff_wait",
+            "Waiting after takeoff",
+            target_point=(0.0, 0.0, args.height),
+            details={"seconds": args.takeoff_wait},
+        )
         sleep_while_recording(args.takeoff_wait, recorder, stop_event)
+        event_logger.log("takeoff_wait_complete", "takeoff_wait", "Takeoff wait completed")
 
         previous_point = (0.0, 0.0, args.height)
         if manual_controller is not None:
@@ -211,7 +311,25 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
                     len(trajectory_points),
                 )
             )
+            event_logger.log(
+                "trajectory_built",
+                "trajectory",
+                "Manual spline trajectory built",
+                target_point=final_point,
+                details={
+                    "waypoint_count": len(waypoints),
+                    "trajectory_points": len(trajectory_points),
+                    "speed": args.speed,
+                },
+            )
             recorder.set_context(1, final_point, args.yaw, "trajectory", reset_tracking=True)
+            event_logger.log(
+                "trajectory_start",
+                "trajectory",
+                "Starting manual spline trajectory",
+                point_index=1,
+                target_point=final_point,
+            )
             reached = manual_controller.follow_spline_trajectory(
                 trajectory_points,
                 speed=args.speed,
@@ -220,6 +338,14 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
                 timeout=None,
             )
             recorder.raise_if_failed()
+            event_logger.log(
+                "trajectory_complete" if reached else "trajectory_stopped",
+                "trajectory",
+                "Manual spline trajectory finished" if reached else "Manual spline trajectory stopped before finish",
+                point_index=1,
+                target_point=final_point,
+                details={"reached": reached},
+            )
             if not reached and not stop_event.is_set():
                 print("WARNING: spline trajectory was not confirmed before stop", file=sys.stderr)
             previous_point = final_point
@@ -227,6 +353,14 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
             for point_index, (x, y, z) in enumerate(waypoints, 1):
                 if stop_event.is_set():
                     action = "RTL..." if command_state.get_action() == "rtl" else "Landing..."
+                    event_logger.log(
+                        "route_interrupted",
+                        "move",
+                        "Route interrupted before waypoint",
+                        point_index=point_index,
+                        target_point=(x, y, z),
+                        details={"final_action": command_state.get_action()},
+                    )
                     print("Route interrupted before point {}. {}".format(point_index, action))
                     break
 
@@ -234,6 +368,14 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
                 next_point = (x, y, z)
                 point_time = args.point_time or estimate_move_time(previous_point, next_point, args.speed)
                 recorder.set_context(point_index, next_point, args.yaw, "move", reset_tracking=True)
+                event_logger.log(
+                    "waypoint_start",
+                    "move",
+                    "Sending autopilot waypoint",
+                    point_index=point_index,
+                    target_point=next_point,
+                    details={"point_time": point_time},
+                )
                 command_local_point(drone, x, y, z, yaw=args.yaw, point_time=point_time)
                 reached = wait_for_point(
                     drone=drone,
@@ -242,19 +384,64 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
                     stop_event=stop_event,
                 )
                 recorder.raise_if_failed()
+                event_logger.log(
+                    "waypoint_complete" if reached else "waypoint_timeout",
+                    "move",
+                    "Autopilot waypoint reached" if reached else "Autopilot waypoint was not confirmed before timeout",
+                    point_index=point_index,
+                    target_point=next_point,
+                    details={"reached": reached},
+                )
                 if not reached and not stop_event.is_set():
                     print("WARNING: waypoint {} was not confirmed before timeout".format(point_index), file=sys.stderr)
                 if not stop_event.is_set() and args.settle_time > 0:
                     recorder.set_context(point_index, next_point, args.yaw, "settle")
+                    event_logger.log(
+                        "settle_start",
+                        "settle",
+                        "Waiting at waypoint",
+                        point_index=point_index,
+                        target_point=next_point,
+                        details={"seconds": args.settle_time},
+                    )
                     sleep_while_recording(args.settle_time, recorder, stop_event)
+                    event_logger.log(
+                        "settle_complete",
+                        "settle",
+                        "Waypoint settle wait completed",
+                        point_index=point_index,
+                        target_point=next_point,
+                    )
 
                 recorder.set_context(point_index, next_point, args.yaw, "hold")
+                event_logger.log(
+                    "hold_start",
+                    "hold",
+                    "Holding at waypoint",
+                    point_index=point_index,
+                    target_point=next_point,
+                    details={"seconds": args.wait_per_point},
+                )
                 sleep_while_recording(args.wait_per_point, recorder, stop_event)
+                event_logger.log(
+                    "hold_complete",
+                    "hold",
+                    "Waypoint hold completed",
+                    point_index=point_index,
+                    target_point=next_point,
+                )
                 previous_point = next_point
 
         final_action = command_state.get_action()
         if final_action == "rtl":
             recorder.set_context(len(waypoints) + 1, previous_point, args.yaw, "rtl")
+            event_logger.log(
+                "rtl_start",
+                "rtl",
+                "Starting return-to-launch sequence",
+                point_index=len(waypoints) + 1,
+                target_point=previous_point,
+            )
             print("RTL...")
             rtl_sent = return_to_launch_or_land(
                 drone=drone,
@@ -267,51 +454,121 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
             )
             allow_disarm = not rtl_sent
             flight_started = False
+            event_logger.log(
+                "rtl_complete",
+                "rtl",
+                "Return-to-launch sequence completed",
+                point_index=len(waypoints) + 1,
+                target_point=previous_point,
+                details={"rtl_sent": rtl_sent},
+            )
         else:
             recorder.set_context(len(waypoints) + 1, previous_point, args.yaw, "landing")
+            event_logger.log(
+                "landing_start",
+                "landing",
+                "Sending landing command",
+                point_index=len(waypoints) + 1,
+                target_point=previous_point,
+            )
             print("Landing...")
             drone.land()
             flight_started = False
+            event_logger.log(
+                "landing_complete",
+                "landing",
+                "Landing command sent",
+                point_index=len(waypoints) + 1,
+                target_point=previous_point,
+            )
             if args.landing_record_time > 0:
                 recorder.set_context(len(waypoints) + 1, previous_point, args.yaw, "landed")
+                event_logger.log(
+                    "landing_record_start",
+                    "landed",
+                    "Recording after landing",
+                    point_index=len(waypoints) + 1,
+                    target_point=previous_point,
+                    details={"seconds": args.landing_record_time},
+                )
                 sleep_while_recording(args.landing_record_time, recorder, stop_event)
+                event_logger.log(
+                    "landing_record_complete",
+                    "landed",
+                    "Post-landing recording completed",
+                    point_index=len(waypoints) + 1,
+                    target_point=previous_point,
+                )
 
         if allow_disarm and hasattr(drone, "disarm"):
             recorder.set_context(len(waypoints) + 1, previous_point, args.yaw, "disarm")
+            event_logger.log(
+                "disarm_start",
+                "disarm",
+                "Sending disarm command",
+                point_index=len(waypoints) + 1,
+                target_point=previous_point,
+            )
             print("Disarming...")
             drone.disarm()
+            event_logger.log(
+                "disarm_complete",
+                "disarm",
+                "Drone disarmed",
+                point_index=len(waypoints) + 1,
+                target_point=previous_point,
+            )
 
     except KeyboardInterrupt:
+        event_logger.log("keyboard_interrupt", "interrupt", "Keyboard interrupt received")
         print("Interrupted. Landing...")
         if flight_started and hasattr(drone, "land"):
             recorder.set_context(0, (0.0, 0.0, 0.0), args.yaw, "interrupt_landing")
+            event_logger.log("interrupt_landing_start", "interrupt_landing", "Landing after keyboard interrupt")
             drone.land()
+            event_logger.log("interrupt_landing_complete", "interrupt_landing", "Landing command sent after interrupt")
         elif is_armed and hasattr(drone, "disarm"):
             recorder.set_context(0, (0.0, 0.0, 0.0), args.yaw, "interrupt_disarm")
+            event_logger.log("interrupt_disarm_start", "interrupt_disarm", "Disarming after keyboard interrupt")
             drone.disarm()
+            event_logger.log("interrupt_disarm_complete", "interrupt_disarm", "Disarm command sent after interrupt")
         return 130
 
     except Exception as exc:
+        event_logger.log("error", "error", "Mission error: {}".format(exc), details={"error": str(exc)})
         print("Error: {}".format(exc), file=sys.stderr)
         if flight_started and hasattr(drone, "land"):
             print("Landing after error...")
             try:
                 recorder.set_context(0, (0.0, 0.0, 0.0), args.yaw, "error_landing")
+                event_logger.log("error_landing_start", "error_landing", "Landing after mission error")
                 drone.land()
+                event_logger.log("error_landing_complete", "error_landing", "Landing command sent after error")
             except Exception as land_exc:
+                event_logger.log(
+                    "error_landing_failed",
+                    "error_landing",
+                    "Landing after error failed: {}".format(land_exc),
+                    details={"error": str(land_exc)},
+                )
                 print("Landing failed: {}".format(land_exc), file=sys.stderr)
         elif is_armed and hasattr(drone, "disarm"):
             print("Disarming after preflight/takeoff error...")
             recorder.set_context(0, (0.0, 0.0, 0.0), args.yaw, "error_disarm")
+            event_logger.log("error_disarm_start", "error_disarm", "Disarming after preflight/takeoff error")
             drone.disarm()
+            event_logger.log("error_disarm_complete", "error_disarm", "Disarm command sent after error")
         return 1
 
     finally:
+        event_logger.log("cleanup_start", "cleanup", "Stopping recorder and closing camera/video")
         recorder.stop()
         recorder.join()
         camera.close()
         video_logger.close()
+        event_logger.log("cleanup_complete", "cleanup", "Recorder and camera/video closed")
 
+    event_logger.log("mission_complete", "complete", "Mission script completed successfully")
     return 0
 
 
@@ -362,6 +619,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--battery-check-retries", type=int, default=3)
     parser.add_argument("--battery-check-delay", type=float, default=0.5)
     parser.add_argument("--csv", default="orb_ransac_localization.csv")
+    parser.add_argument("--events-log", default="flight_events.csv", help="CSV log for mission events/actions.")
     parser.add_argument("--debug-dir")
     parser.add_argument("--video-camera-out", default="camera_overlay.avi")
     parser.add_argument("--video-map-out", default="map_trace.avi")

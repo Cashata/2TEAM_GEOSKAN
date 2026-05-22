@@ -22,6 +22,7 @@ from geoscan_mission.flight.control import (
 )
 from geoscan_mission.recording import (
     ContinuousFlightRecorder,
+    FlightEventLogger,
     FlightVideoLogger,
     append_csv,
     aruco_frame_summary,
