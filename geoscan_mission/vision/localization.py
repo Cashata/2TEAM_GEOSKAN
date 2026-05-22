@@ -9,6 +9,8 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+from geoscan_mission.vision.orb_grid import OrbDetector
+
 
 @dataclass
 class LocalizeResult:
@@ -23,6 +25,7 @@ class LocalizeResult:
     good_matches: int = 0
     inliers: int = 0
     inlier_ratio: float = 0.0
+    angle_rad: float | None = None
     homography_area: float | None = None
     accepted_by_filter: bool = False
     filter_reason: str = ""
@@ -54,6 +57,8 @@ class OrbRansacLocalizer:
         self.map_width_m = map_width_m
         self.map_height_m = map_height_m
         self.feature = feature.lower()
+        if self.feature != "orb":
+            raise ValueError("Only --feature orb is supported in the flight pipeline")
         self.ratio = ratio
         self.min_matches = min_matches
         self.min_inliers = min_inliers
@@ -69,37 +74,13 @@ class OrbRansacLocalizer:
         self.smooth_x_m: float | None = None
         self.smooth_y_m: float | None = None
         self.first_valid_for_waypoint = True
-        self.clahe = (
-            cv2.createCLAHE(clipLimit=clahe_clip, tileGridSize=(clahe_tile, clahe_tile))
-            if clahe_clip > 0
-            else None
+        self.orb_grid: OrbDetector | None = None
+        self.orb_grid = OrbDetector(
+            map_file=reference_path,
+            map_size_m=(map_width_m, map_height_m),
         )
-
-        self.reference = cv2.imread(reference_path, cv2.IMREAD_GRAYSCALE)
-        if self.reference is None:
-            raise FileNotFoundError("Cannot read reference map: {}".format(reference_path))
-
-        self.reference = self.resize_reference(self.reference, reference_max_size)
+        self.reference = self.orb_grid.map_im
         self.ref_h, self.ref_w = self.reference.shape[:2]
-        self.detector, self.norm_type = self.create_detector(self.feature, nfeatures)
-        reference_features = self.preprocess_gray(self.reference)
-        self.kp_ref, self.des_ref = self.detector.detectAndCompute(reference_features, None)
-        if self.des_ref is None or len(self.kp_ref) < min_matches:
-            raise RuntimeError("Reference map has too few {} keypoints".format(self.feature.upper()))
-
-        self.matcher = cv2.BFMatcher(self.norm_type)
-
-    @staticmethod
-    def create_detector(feature: str, nfeatures: int):
-        if feature == "orb":
-            return cv2.ORB_create(nfeatures=nfeatures), cv2.NORM_HAMMING
-        if feature == "akaze":
-            return cv2.AKAZE_create(), cv2.NORM_HAMMING
-        if feature == "sift":
-            if not hasattr(cv2, "SIFT_create"):
-                raise RuntimeError("OpenCV build does not provide SIFT_create(); use --feature orb or akaze")
-            return cv2.SIFT_create(nfeatures=nfeatures), cv2.NORM_L2
-        raise ValueError("--feature must be orb, akaze, or sift")
 
     @staticmethod
     def resize_reference(reference: np.ndarray, max_size: int) -> np.ndarray:
@@ -111,11 +92,6 @@ class OrbRansacLocalizer:
             return reference
         scale = max_size / float(longest)
         return cv2.resize(reference, (int(round(width * scale)), int(round(height * scale))), interpolation=cv2.INTER_AREA)
-
-    def preprocess_gray(self, gray: np.ndarray) -> np.ndarray:
-        if self.clahe is None:
-            return gray
-        return self.clahe.apply(gray)
 
     def prepare_frame(self, frame_bgr: np.ndarray) -> np.ndarray:
         width, height = self.frame_size
@@ -201,6 +177,7 @@ class OrbRansacLocalizer:
             good_matches=good_matches,
             inliers=inliers,
             inlier_ratio=inlier_ratio,
+            angle_rad=None,
             homography_area=homography_area,
             accepted_by_filter=True,
             filter_reason="ok",
@@ -208,46 +185,36 @@ class OrbRansacLocalizer:
 
     def estimate(self, frame_bgr: np.ndarray) -> tuple[LocalizeResult, np.ndarray | None, np.ndarray]:
         frame_bgr = self.prepare_frame(frame_bgr)
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        gray = self.preprocess_gray(gray)
-        kp_frame, des_frame = self.detector.detectAndCompute(gray, None)
+        return self.estimate_orb_grid(frame_bgr)
 
-        if des_frame is None or len(kp_frame) < self.min_matches:
-            return self.reject_result("too few frame keypoints"), None, frame_bgr
+    def estimate_orb_grid(self, frame_bgr: np.ndarray) -> tuple[LocalizeResult, np.ndarray | None, np.ndarray]:
+        assert self.orb_grid is not None
 
-        knn = self.matcher.knnMatch(des_frame, self.des_ref, k=2)
-        good = []
-        for pair in knn:
-            if len(pair) < 2:
-                continue
-            m, n = pair
-            if m.distance < self.ratio * n.distance:
-                good.append(m)
+        if len(frame_bgr.shape) == 3:
+            frame_gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        else:
+            frame_gray = frame_bgr
 
-        if len(good) < self.min_matches:
-            return self.reject_result("too few good matches", good_matches=len(good)), None, frame_bgr
+        homography, mask, _ = self.orb_grid._estimate_homography(frame_gray)
+        good_matches = self.orb_grid.last_good_matches
+        inliers = self.orb_grid.last_inliers
+        inlier_ratio = inliers / max(good_matches, 1)
 
-        pts_frame = np.float32([kp_frame[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
-        pts_ref = np.float32([self.kp_ref[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
-
-        homography, mask = cv2.findHomography(
-            pts_frame,
-            pts_ref,
-            cv2.RANSAC,
-            self.ransac_threshold,
-        )
         if homography is None or mask is None:
-            return self.reject_result("RANSAC homography failed", good_matches=len(good)), None, frame_bgr
+            return self.reject_result(
+                "ORB grid homography failed",
+                good_matches=good_matches,
+                inliers=inliers,
+                inlier_ratio=inlier_ratio,
+            ), None, frame_bgr
 
-        inliers = int(mask.ravel().sum())
-        inlier_ratio = inliers / max(len(good), 1)
-        homography_area = self.homography_area_m2(homography, gray.shape[:2])
-
-        if inliers < self.min_inliers:
+        homography_area = self.homography_area_m2(homography, frame_gray.shape[:2])
+        coordinates = self.orb_grid._coordinates_from_homography(frame_gray, homography, in_meters=True)
+        if coordinates is None:
             return (
                 self.reject_result(
-                    "too few RANSAC inliers",
-                    good_matches=len(good),
+                    "ORB grid coordinate projection failed",
+                    good_matches=good_matches,
                     inliers=inliers,
                     inlier_ratio=inlier_ratio,
                     homography_area=homography_area,
@@ -256,75 +223,13 @@ class OrbRansacLocalizer:
                 frame_bgr,
             )
 
-        if inlier_ratio < self.min_inlier_ratio:
-            return (
-                self.reject_result(
-                    "low RANSAC inlier ratio",
-                    good_matches=len(good),
-                    inliers=inliers,
-                    inlier_ratio=inlier_ratio,
-                    homography_area=homography_area,
-                ),
-                homography,
-                frame_bgr,
-            )
-
-        if homography_area is None or homography_area < self.min_homography_area_m2:
-            return (
-                self.reject_result(
-                    "homography area too small",
-                    good_matches=len(good),
-                    inliers=inliers,
-                    inlier_ratio=inlier_ratio,
-                    homography_area=homography_area,
-                ),
-                homography,
-                frame_bgr,
-            )
-
-        if homography_area > self.max_homography_area_m2:
-            return (
-                self.reject_result(
-                    "homography area too large",
-                    good_matches=len(good),
-                    inliers=inliers,
-                    inlier_ratio=inlier_ratio,
-                    homography_area=homography_area,
-                ),
-                homography,
-                frame_bgr,
-            )
-
-        h, w = gray.shape[:2]
-        center_frame = np.float32([[[w / 2.0, h / 2.0]]])
-        center_ref = cv2.perspectiveTransform(center_frame, homography)[0, 0]
-        ref_x, ref_y = float(center_ref[0]), float(center_ref[1])
-
-        if not (0.0 <= ref_x <= self.ref_w and 0.0 <= ref_y <= self.ref_h):
+        mapped_m, angle_rad = coordinates
+        raw_x_m, raw_y_m = float(mapped_m[0]), float(mapped_m[1])
+        if not (0.0 <= raw_x_m <= self.map_width_m and 0.0 <= raw_y_m <= self.map_height_m):
             return (
                 self.reject_result(
                     "estimated center is outside reference map",
-                    good_matches=len(good),
-                    inliers=inliers,
-                    inlier_ratio=inlier_ratio,
-                    homography_area=homography_area,
-                ),
-                homography,
-                frame_bgr,
-            )
-
-        raw_x_m, raw_y_m = self.ref_pixel_to_map_m(ref_x, ref_y)
-        if (
-            self.max_position_jump > 0
-            and not self.first_valid_for_waypoint
-            and self.smooth_x_m is not None
-            and self.smooth_y_m is not None
-            and math.dist((raw_x_m, raw_y_m), (self.smooth_x_m, self.smooth_y_m)) > self.max_position_jump
-        ):
-            return (
-                self.reject_result(
-                    "position jump too large",
-                    good_matches=len(good),
+                    good_matches=good_matches,
                     inliers=inliers,
                     inlier_ratio=inlier_ratio,
                     homography_area=homography_area,
@@ -335,7 +240,38 @@ class OrbRansacLocalizer:
                 frame_bgr,
             )
 
-        return self.accept_result(raw_x_m, raw_y_m, len(good), inliers, inlier_ratio, homography_area), homography, frame_bgr
+        if (
+            self.max_position_jump > 0
+            and not self.first_valid_for_waypoint
+            and self.smooth_x_m is not None
+            and self.smooth_y_m is not None
+            and math.dist((raw_x_m, raw_y_m), (self.smooth_x_m, self.smooth_y_m)) > self.max_position_jump
+        ):
+            return (
+                self.reject_result(
+                    "position jump too large",
+                    good_matches=good_matches,
+                    inliers=inliers,
+                    inlier_ratio=inlier_ratio,
+                    homography_area=homography_area,
+                    raw_x_m=raw_x_m,
+                    raw_y_m=raw_y_m,
+                ),
+                homography,
+                frame_bgr,
+            )
+
+        result = self.accept_result(
+            raw_x_m,
+            raw_y_m,
+            good_matches,
+            inliers,
+            inlier_ratio,
+            homography_area,
+        )
+        result.angle_rad = float(angle_rad)
+        result.filter_reason = "ok"
+        return result, homography, frame_bgr
 
     def draw_debug(self, frame_bgr: np.ndarray, result: LocalizeResult, homography: np.ndarray | None) -> np.ndarray:
         ref_debug = cv2.cvtColor(self.reference, cv2.COLOR_GRAY2BGR)

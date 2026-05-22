@@ -301,7 +301,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reference", default="map.jpg")
     parser.add_argument("--map-width-m", type=float, default=3.0)
     parser.add_argument("--map-height-m", type=float, default=3.0)
-    parser.add_argument("--feature", choices=["orb", "akaze", "sift"], default="orb")
+    parser.add_argument("--feature", choices=["orb"], default="orb")
     parser.add_argument("--nfeatures", type=int, default=4000)
     parser.add_argument("--ratio", type=float, default=0.8)
     parser.add_argument("--min-matches", type=int, default=18)

@@ -13,6 +13,16 @@ import numpy as np
 
 
 DEFAULT_BOARD_SIZE = (6, 9)
+CHESSBOARD_FLAGS = (
+    cv2.CALIB_CB_ADAPTIVE_THRESH
+    + cv2.CALIB_CB_FAST_CHECK
+    + cv2.CALIB_CB_NORMALIZE_IMAGE
+)
+CORNER_REFINEMENT_CRITERIA = (
+    cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER,
+    30,
+    0.001,
+)
 
 
 @dataclass
@@ -88,6 +98,54 @@ def _object_points(board_size: tuple[int, int], square_size: float) -> np.ndarra
     return objp
 
 
+def find_chessboard_corners(
+    image: np.ndarray,
+    board_size: tuple[int, int] = DEFAULT_BOARD_SIZE,
+) -> tuple[bool, np.ndarray | None]:
+    gray = _as_gray(image)
+    found, corners = cv2.findChessboardCorners(gray, board_size, CHESSBOARD_FLAGS)
+    if not found:
+        return False, None
+
+    refined_corners = cv2.cornerSubPix(
+        gray,
+        corners,
+        (11, 11),
+        (-1, -1),
+        CORNER_REFINEMENT_CRITERIA,
+    )
+    return True, refined_corners
+
+
+def draw_chessboard_preview(
+    image: np.ndarray,
+    board_size: tuple[int, int],
+    found: bool,
+    corners: np.ndarray | None,
+    status_text: str,
+) -> np.ndarray:
+    if image.ndim == 2:
+        annotated = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    else:
+        annotated = image.copy()
+
+    if found and corners is not None:
+        cv2.drawChessboardCorners(annotated, board_size, corners, found)
+
+    color = (0, 220, 0) if found else (0, 0, 255)
+    cv2.rectangle(annotated, (0, 0), (annotated.shape[1], 36), (0, 0, 0), -1)
+    cv2.putText(
+        annotated,
+        status_text,
+        (12, 25),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        color,
+        2,
+    )
+    return annotated
+
+
 def _mean_reprojection_error(
     objpoints: list[np.ndarray],
     imgpoints: list[np.ndarray],
@@ -113,17 +171,6 @@ def calibrate_camera(
     debug_dir: str | None = None,
 ) -> CameraCalibration:
     """Estimate camera matrix and distortion from chessboard frames."""
-
-    criteria = (
-        cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER,
-        30,
-        0.001,
-    )
-    flags = (
-        cv2.CALIB_CB_ADAPTIVE_THRESH
-        + cv2.CALIB_CB_FAST_CHECK
-        + cv2.CALIB_CB_NORMALIZE_IMAGE
-    )
 
     objp = _object_points(board_size, square_size)
     objpoints: list[np.ndarray] = []
@@ -151,13 +198,17 @@ def calibrate_camera(
                 )
             )
 
-        found, corners = cv2.findChessboardCorners(gray, board_size, flags)
-        annotated = image.copy()
+        found, corners2 = find_chessboard_corners(image, board_size)
+        annotated = draw_chessboard_preview(
+            image,
+            board_size,
+            found,
+            corners2,
+            "FOUND" if found else "MISSING",
+        )
         if found:
-            corners2 = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
             objpoints.append(objp.copy())
             imgpoints.append(corners2)
-            cv2.drawChessboardCorners(annotated, board_size, corners2, found)
 
         if out_dir is not None:
             status = "ok" if found else "miss"

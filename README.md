@@ -11,6 +11,7 @@
 | `geoscan_mission/flight/` | Управление дроном, SDK2/OpenCV/video camera adapters, battery check, waypoint-команды. |
 | `geoscan_mission/flight/trajectory_control.py` | Экспериментальное PID/manual-speed управление через `set_manual_speed_body_fixed`. |
 | `geoscan_mission/vision/localization.py` | ORB/RANSAC-локализация кадра на reference-карте. |
+| `geoscan_mission/vision/orb_grid.py` | Grid-ORB локализатор из `orb.py`; основной полетный сценарий поддерживает только `--feature orb`. |
 | `geoscan_mission/vision/aruco.py` | ArUco-детектор целей миссии и накопление найденного слова. |
 | `geoscan_mission/trajectory/` | Паттерны `waypoints`, `square`, `lawnmower`, `cube` и grid path helpers. |
 | `geoscan_mission/recording.py` | CSV/JSON-логи, видеооверлеи, ArUco-summary и проекция маркеров на карту. |
@@ -45,6 +46,9 @@ python3 calibration.py --camera-source sdk2 --sdk2-camera-type OPT --max-frames 
 ```
 
 По умолчанию ожидается шахматная доска `6 x 9` внутренних углов; если распечатка другая, задайте `--board-cols` и `--board-rows`.
+Во время сбора скрипт запускает live-preview на `http://<ip-дрона>:8000/` и обновляет `calibration_preview.jpg`.
+Кадр сохраняется в `calibration_frames` только когда шахматная доска найдена полностью.
+Если порт занят или трансляция не нужна, добавьте `--preview-port 0`.
 
 После этого основной сценарий можно запускать с выпрямлением кадра:
 
