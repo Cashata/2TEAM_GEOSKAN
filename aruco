@@ -1,0 +1,48 @@
+import cv2
+import numpy as np
+
+class ArucoDetector:
+    def __init__(self):
+        self.marker_db = {
+            3:   {"letter": "И", "type": "allowed"},
+            23:  {"letter": "Т", "type": "allowed"},
+            42:  {"letter": "М", "type": "forbidden"},
+            117: {"letter": "О", "type": "forbidden"}
+        }
+        self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_1000)
+        try:
+            self.params = cv2.aruco.DetectorParameters()
+        except AttributeError:
+            self.params = cv2.aruco.DetectorParameters_create()
+        self.found_markers = {}
+
+    def process_frame(self, frame):
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        corners, ids, _ = cv2.aruco.detectMarkers(gray, self.aruco_dict, parameters=self.params)
+        if ids is not None:
+            for i, marker_id in enumerate(ids.flatten()):
+                if marker_id not in self.marker_db or marker_id in self.found_markers:
+                    continue
+                info = self.marker_db[marker_id]
+                corner = corners[i][0]
+                center_px = np.mean(corner, axis=0).tolist()
+                self.found_markers[marker_id] = {
+                    "letter": info["letter"],
+                    "type": info["type"],
+                    "corners_px": corner.tolist(),
+                    "center_px": center_px
+                }
+
+    def reset(self):
+        self.found_markers.clear()
+
+    def get_word(self):
+        sorted_ids = sorted(self.found_markers.keys())
+        return "".join(self.found_markers[mid]["letter"] for mid in sorted_ids)
+
+IMG_PATH = "frame.jpg"
+frame = cv2.imread(IMG_PATH)
+
+detector = ArucoDetector()
+detector.process_frame(frame)
+word = detector.get_word()
