@@ -1,10 +1,5 @@
-import numpy as np
-from scipy.interpolate import splprep, splev
+"""Compatibility re-export for path smoothing."""
 
+from geoscan_mission.trajectory.grid_path import SmoothPath
 
-class SmoothPath:
-    def __init__(self, path, s=50, k=2, num_points=20):
-        tck, u = splprep(path.T, s=s, k=k)
-        u_new = np.linspace(0, 1, num_points)
-        x, y = splev(u_new, tck)
-        self.path = np.column_stack((x, y))
+__all__ = ["SmoothPath"]

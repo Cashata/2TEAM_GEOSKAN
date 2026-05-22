@@ -4,12 +4,16 @@
 
 Репозиторий собирает практичный контур для задания "Дроно-старт": полет Geoscan Pioneer Mini 2 по локальным waypoint, локализация кадра на карте 3 x 3 м через ORB/RANSAC homography, распознавание целевых ArUco ID `3`, `23`, `42`, `117` и восстановление слова `ИТМО`.
 
-Ключевые файлы:
+Ключевые файлы и модули:
 
 | Файл | Назначение |
 | --- | --- |
-| `fly_orb_ransac.py` | Основной полетный сценарий: маршрут, запись видео/CSV, локализация по карте и опциональное ArUco-распознавание. |
-| `aruco_detector.py` | Переиспользуемый детектор ArUco-целей миссии: ID, тип цели, буква, пиксельные координаты и накопленное слово. |
+| `fly_orb_ransac.py` | Совместимая CLI-обертка для основного сценария. Старые команды запуска остаются рабочими. |
+| `geoscan_mission/flight/` | Управление дроном, SDK2 camera adapters, battery check, waypoint-команды и ожидание достижения точки. |
+| `geoscan_mission/vision/` | ORB/RANSAC-локализация по карте и ArUco-детектор целей миссии. |
+| `geoscan_mission/trajectory/` | Генерация маршрутов `waypoints/square/lawnmower/cube` и grid path planning helpers. |
+| `geoscan_mission/recording.py` | Непрерывная запись кадров, CSV/JSON-строки, видеооверлеи и ArUco-проекции на карту. |
+| `aruco_detector.py` | Совместимый re-export ArUco-детектора для старых импортов. |
 | `aruco` | CLI-обертка для проверки одного изображения: `python aruco --image frame.jpg --json`. |
 | `collect_dataset_mini2.py` | Автосбор кадров с Mini 2 для датасета landmarks/YOLO. |
 | `keypoint_map_localizer.py` | Отдельная утилита для проверки локализации по изображению, видео или камере Mini 2. |
@@ -26,6 +30,21 @@ python fly_orb_ransac.py --no-flight --reference map.jpg --camera-index 0 --aruc
 ```bash
 python3 fly_orb_ransac.py --reference map.jpg --camera-source sdk2 --sdk2-camera-type OPT --aruco
 ```
+
+## Как отдельно дорабатывать части системы
+
+Новая структура сделана так, чтобы команда могла править отдельные слои без конфликтов:
+
+- управление полетом: `geoscan_mission/flight/control.py`;
+- камеры: `geoscan_mission/flight/camera.py`;
+- маршруты и траектории: `geoscan_mission/trajectory/patterns.py`;
+- grid path planning из старых `PathFinder.py`/`SmoothPath.py`: `geoscan_mission/trajectory/grid_path.py`;
+- ArUco: `geoscan_mission/vision/aruco.py`;
+- ORB/RANSAC-локализация: `geoscan_mission/vision/localization.py`;
+- логи, CSV, JSON и видеооверлей: `geoscan_mission/recording.py`;
+- сборка CLI-сценариев: `geoscan_mission/cli/`.
+
+Корневые `fly_orb_ransac.py`, `aruco`, `aruco_detector.py`, `PathFinder.py` и `SmoothPath.py` оставлены как compatibility wrappers, чтобы старые команды и импорты не ломались.
 
 При включенном `--aruco` каждая JSON/CSV-строка получает дополнительные поля:
 
