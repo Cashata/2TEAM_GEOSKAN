@@ -13,10 +13,13 @@
 | `geoscan_mission/vision/aruco.py` | ArUco-детектор целей миссии и накопление найденного слова. |
 | `geoscan_mission/trajectory/` | Паттерны `waypoints`, `square`, `lawnmower`, `cube` и grid path helpers. |
 | `geoscan_mission/recording.py` | CSV/JSON-логи, видеооверлеи, ArUco-summary и проекция маркеров на карту. |
-| `keypoint_map_localizer.py` | Отдельная утилита для проверки RANSAC-локализации по изображению, видео или камере Mini 2. |
+| `tools/keypoint_map_localizer.py` | Отдельная утилита для проверки RANSAC-локализации по изображению, видео или камере Mini 2. |
+| `tools/collect_dataset_mini2.py` | Утилита сбора кадров с Mini 2 и dry-run предпросмотра маршрута. |
+| `tools/grid_path_demo.py` | Demo для grid path planning вокруг запретной зоны на карте. |
+| `docs/` | Задание и курируемые заметки по полезным источникам/улучшениям. |
 | `aruco` | CLI для проверки ArUco на одном изображении. |
 
-Корневые `aruco_detector.py`, `PathFinder.py` и `SmoothPath.py` оставлены как compatibility re-export, чтобы старые импорты не ломались.
+Корневые `fly_orb_ransac.py`, `aruco`, `aruco_detector.py`, `PathFinder.py` и `SmoothPath.py` оставлены как compatibility launchers/re-export, чтобы старые команды и импорты не ломались.
 
 ## Быстрый запуск
 
@@ -63,7 +66,7 @@ python fly_orb_ransac.py ^
 Быстрая проверка только RANSAC-локализации:
 
 ```bash
-python keypoint_map_localizer.py ^
+python tools/keypoint_map_localizer.py ^
   --reference map.jpg ^
   --video flight.mp4 ^
   --csv video_localization.csv ^
@@ -74,7 +77,13 @@ python keypoint_map_localizer.py ^
 Для одного кадра:
 
 ```bash
-python keypoint_map_localizer.py --reference map.jpg --image frame.jpg --output-dir debug/frame
+python tools/keypoint_map_localizer.py --reference map.jpg --image frame.jpg --output-dir debug/frame
+```
+
+Dry-run маршрута для сбора кадров:
+
+```bash
+python tools/collect_dataset_mini2.py --dry-run
 ```
 
 ## Логи ArUco

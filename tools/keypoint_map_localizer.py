@@ -9,9 +9,9 @@ Pipeline:
   frame center on reference -> x/y coordinates in map meters
 
 Examples:
-  python3 keypoint_map_localizer.py --reference map_reference.png --image frame.jpg
-  python3 keypoint_map_localizer.py --reference map_reference.png --video flight.mp4 --output-dir debug
-  python3 keypoint_map_localizer.py --reference map_reference.png --mini2-camera
+  python3 tools/keypoint_map_localizer.py --reference map_reference.png --image frame.jpg
+  python3 tools/keypoint_map_localizer.py --reference map_reference.png --video flight.mp4 --output-dir debug
+  python3 tools/keypoint_map_localizer.py --reference map_reference.png --mini2-camera
 """
 
 from __future__ import annotations

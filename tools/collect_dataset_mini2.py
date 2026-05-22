@@ -13,10 +13,10 @@ Safe default:
   With area=3.0 and margin=0.25, XY points stay inside [-1.25, 1.25].
 
 Example:
-  python3 collect_dataset_mini2.py
+  python3 tools/collect_dataset_mini2.py
 
 Dry route preview without importing drone/camera SDK:
-  python3 collect_dataset_mini2.py --dry-run
+  python3 tools/collect_dataset_mini2.py --dry-run
 """
 
 from __future__ import annotations
