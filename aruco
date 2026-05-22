@@ -1,48 +1,68 @@
+#!/usr/bin/env python3
+"""Small CLI wrapper around aruco_detector.py."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
 import cv2
-import numpy as np
 
-class ArucoDetector:
-    def __init__(self):
-        self.marker_db = {
-            3:   {"letter": "И", "type": "allowed"},
-            23:  {"letter": "Т", "type": "allowed"},
-            42:  {"letter": "М", "type": "forbidden"},
-            117: {"letter": "О", "type": "forbidden"}
-        }
-        self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_1000)
-        try:
-            self.params = cv2.aruco.DetectorParameters()
-        except AttributeError:
-            self.params = cv2.aruco.DetectorParameters_create()
-        self.found_markers = {}
+from aruco_detector import ArucoDetector, DEFAULT_DICTIONARY
 
-    def process_frame(self, frame):
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        corners, ids, _ = cv2.aruco.detectMarkers(gray, self.aruco_dict, parameters=self.params)
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Detect mission ArUco markers in one image.")
+    parser.add_argument("--image", default="frame.jpg", help="Input image path.")
+    parser.add_argument("--dict", default=DEFAULT_DICTIONARY, help="OpenCV ArUco dictionary name.")
+    parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    parser.add_argument("--draw", help="Optional output image with detected markers drawn.")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    frame = cv2.imread(args.image, cv2.IMREAD_COLOR)
+    if frame is None:
+        print("cannot read image: {}".format(args.image), file=sys.stderr)
+        return 1
+
+    detector = ArucoDetector(dictionary_name=args.dict)
+    markers = detector.process_frame(frame)
+    result = {
+        "image": str(Path(args.image)),
+        "dictionary": args.dict,
+        "seen_ids": [marker.marker_id for marker in markers],
+        "new_ids": [marker.marker_id for marker in markers if marker.first_seen],
+        "allowed_ids": detector.found_ids("allowed"),
+        "forbidden_ids": detector.found_ids("forbidden"),
+        "word": detector.get_word(),
+        "markers": [marker.as_dict() for marker in markers],
+    }
+
+    if args.draw:
+        corners, ids, _ = detector.detect_markers(frame)
         if ids is not None:
-            for i, marker_id in enumerate(ids.flatten()):
-                if marker_id not in self.marker_db or marker_id in self.found_markers:
-                    continue
-                info = self.marker_db[marker_id]
-                corner = corners[i][0]
-                center_px = np.mean(corner, axis=0).tolist()
-                self.found_markers[marker_id] = {
-                    "letter": info["letter"],
-                    "type": info["type"],
-                    "corners_px": corner.tolist(),
-                    "center_px": center_px
-                }
+            cv2.aruco.drawDetectedMarkers(frame, corners, ids)
+        ok = cv2.imwrite(args.draw, frame)
+        if not ok:
+            print("cannot write image: {}".format(args.draw), file=sys.stderr)
+            return 1
 
-    def reset(self):
-        self.found_markers.clear()
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print("Seen IDs: {}".format(result["seen_ids"]))
+        print("Allowed IDs: {}".format(result["allowed_ids"]))
+        print("Forbidden IDs: {}".format(result["forbidden_ids"]))
+        print("Word: {}".format(result["word"] or "-"))
 
-    def get_word(self):
-        sorted_ids = sorted(self.found_markers.keys())
-        return "".join(self.found_markers[mid]["letter"] for mid in sorted_ids)
+    return 0
 
-IMG_PATH = "frame.jpg"
-frame = cv2.imread(IMG_PATH)
 
-detector = ArucoDetector()
-detector.process_frame(frame)
-word = detector.get_word()
+if __name__ == "__main__":
+    raise SystemExit(main())

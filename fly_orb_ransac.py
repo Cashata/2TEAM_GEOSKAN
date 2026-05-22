@@ -34,6 +34,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from aruco_detector import ArucoDetector, ArucoMarker, DEFAULT_DICTIONARY
+
 
 DEFAULT_WAYPOINTS = [
     (1.0, 0.0, 1.0),
@@ -605,6 +607,7 @@ def result_row(
     target_point: tuple[float, float, float],
     yaw: float,
     phase: str,
+    aruco_summary: dict[str, object] | None = None,
 ) -> dict[str, object]:
     row = asdict(result)
     row["timestamp"] = time.time()
@@ -618,6 +621,8 @@ def result_row(
     row["target_y_m"] = target_point[1]
     row["target_z_m"] = target_point[2]
     row["target_yaw"] = yaw
+    if aruco_summary is not None:
+        row.update(aruco_summary)
     return row
 
 
@@ -629,6 +634,40 @@ def map_point_to_pixel(localizer: OrbRansacLocalizer, x_m: float, y_m: float) ->
     px = int(round(x_m / localizer.map_width_m * localizer.ref_w))
     py = int(round(y_m / localizer.map_height_m * localizer.ref_h))
     return px, py
+
+
+def project_aruco_markers(
+    markers: list[ArucoMarker],
+    homography_frame_to_ref: np.ndarray | None,
+    localizer: OrbRansacLocalizer,
+    detector: ArucoDetector,
+) -> None:
+    if homography_frame_to_ref is None:
+        return
+
+    for marker in markers:
+        center_frame = np.float32([[marker.center_px]])
+        center_ref = cv2.perspectiveTransform(center_frame, homography_frame_to_ref)[0, 0]
+        if not np.all(np.isfinite(center_ref)):
+            continue
+
+        ref_x, ref_y = float(center_ref[0]), float(center_ref[1])
+        marker.center_ref_px = [ref_x, ref_y]
+        if 0.0 <= ref_x <= localizer.ref_w and 0.0 <= ref_y <= localizer.ref_h:
+            map_x, map_y = localizer.ref_pixel_to_map_m(ref_x, ref_y)
+            marker.center_map_m = [map_x, map_y]
+        detector.remember_projection(marker)
+
+
+def aruco_frame_summary(markers: list[ArucoMarker], detector: ArucoDetector) -> dict[str, object]:
+    return {
+        "aruco_seen_ids": [marker.marker_id for marker in markers],
+        "aruco_new_ids": [marker.marker_id for marker in markers if marker.first_seen],
+        "aruco_word": detector.get_word(),
+        "aruco_allowed_ids": detector.found_ids("allowed"),
+        "aruco_forbidden_ids": detector.found_ids("forbidden"),
+        "aruco_markers_json": json.dumps([marker.as_dict() for marker in markers], ensure_ascii=False),
+    }
 
 
 class FlightVideoLogger:
@@ -655,12 +694,37 @@ class FlightVideoLogger:
             raise RuntimeError("Cannot open video writer: {}".format(path))
         return writer
 
-    def camera_overlay(self, frame_bgr: np.ndarray, result: LocalizeResult, point_index: int, frame_id: int) -> np.ndarray:
+    def camera_overlay(
+        self,
+        frame_bgr: np.ndarray,
+        result: LocalizeResult,
+        point_index: int,
+        frame_id: int,
+        aruco_markers: list[ArucoMarker] | None = None,
+        aruco_summary: dict[str, object] | None = None,
+    ) -> np.ndarray:
         overlay = frame_bgr.copy()
         h, w = overlay.shape[:2]
         color = (0, 200, 0) if result.ok else (0, 0, 255)
         status = "OK" if result.ok else "FAIL"
         cv2.circle(overlay, (w // 2, h // 2), 7, color, -1)
+
+        if aruco_markers:
+            for marker in aruco_markers:
+                points = np.array(marker.corners_px, dtype=np.int32)
+                cv2.polylines(overlay, [points], True, (255, 180, 0), 2)
+                center_x, center_y = marker.center_px
+                cv2.circle(overlay, (int(round(center_x)), int(round(center_y))), 5, (255, 180, 0), -1)
+                label = "ID {} {}".format(marker.marker_id, marker.target_type)
+                cv2.putText(
+                    overlay,
+                    label,
+                    (int(round(center_x)) + 8, int(round(center_y)) - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (255, 180, 0),
+                    2,
+                )
 
         xy_text = "x=NA y=NA"
         if result.x_m is not None and result.y_m is not None:
@@ -674,6 +738,13 @@ class FlightVideoLogger:
             xy_text,
             "matches={} inliers={} ratio={:.2f}".format(result.good_matches, result.inliers, result.inlier_ratio),
         ]
+        if aruco_summary is not None:
+            lines.append(
+                "aruco ids={} word={}".format(
+                    aruco_summary["aruco_seen_ids"],
+                    aruco_summary["aruco_word"] or "-",
+                )
+            )
         y = 24
         for line in lines:
             cv2.putText(overlay, line, (12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
@@ -706,9 +777,24 @@ class FlightVideoLogger:
         cv2.putText(canvas, result.filter_reason or result.message, (20, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
         return canvas
 
-    def write(self, frame_bgr: np.ndarray, result: LocalizeResult, point_index: int, frame_id: int) -> None:
+    def write(
+        self,
+        frame_bgr: np.ndarray,
+        result: LocalizeResult,
+        point_index: int,
+        frame_id: int,
+        aruco_markers: list[ArucoMarker] | None = None,
+        aruco_summary: dict[str, object] | None = None,
+    ) -> None:
         if self.camera_path:
-            camera_frame = self.camera_overlay(frame_bgr, result, point_index, frame_id)
+            camera_frame = self.camera_overlay(
+                frame_bgr,
+                result,
+                point_index,
+                frame_id,
+                aruco_markers=aruco_markers,
+                aruco_summary=aruco_summary,
+            )
             if self.camera_writer is None:
                 size = (camera_frame.shape[1], camera_frame.shape[0])
                 self.camera_writer = self.open_writer(self.camera_path, size)
@@ -739,6 +825,7 @@ class ContinuousFlightRecorder:
         camera_type: str,
         yaw: float,
         stop_event: threading.Event,
+        aruco_detector: ArucoDetector | None = None,
     ) -> None:
         self.camera = camera
         self.localizer = localizer
@@ -756,6 +843,7 @@ class ContinuousFlightRecorder:
         self.yaw = yaw
         self.phase = "preflight"
         self.reset_tracking = True
+        self.aruco_detector = aruco_detector
 
     def set_context(
         self,
@@ -811,10 +899,39 @@ class ContinuousFlightRecorder:
                 frame_id = self.frame_id
                 self.frame_id += 1
 
-                row = result_row(point_index, frame_id, result, self.camera_type, target_point, yaw, phase)
+                aruco_markers: list[ArucoMarker] = []
+                aruco_summary = None
+                if self.aruco_detector is not None:
+                    aruco_markers = self.aruco_detector.process_frame(processed_frame)
+                    if result.ok:
+                        project_aruco_markers(
+                            aruco_markers,
+                            homography,
+                            self.localizer,
+                            self.aruco_detector,
+                        )
+                    aruco_summary = aruco_frame_summary(aruco_markers, self.aruco_detector)
+
+                row = result_row(
+                    point_index,
+                    frame_id,
+                    result,
+                    self.camera_type,
+                    target_point,
+                    yaw,
+                    phase,
+                    aruco_summary=aruco_summary,
+                )
                 print(json.dumps(row, ensure_ascii=False))
                 append_csv(self.csv_path, row)
-                self.video_logger.write(processed_frame, result, point_index, frame_id)
+                self.video_logger.write(
+                    processed_frame,
+                    result,
+                    point_index,
+                    frame_id,
+                    aruco_markers=aruco_markers,
+                    aruco_summary=aruco_summary,
+                )
 
                 if self.debug_dir:
                     out = Path(self.debug_dir)
@@ -966,6 +1083,7 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
         fps=args.video_fps,
         localizer=localizer,
     )
+    aruco_detector = ArucoDetector(dictionary_name=args.aruco_dict) if args.aruco else None
 
     stop_event = threading.Event()
     if not args.no_command_listener:
@@ -984,6 +1102,7 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
             camera_type="opencv:{}".format(args.camera_index),
             yaw=args.yaw,
             stop_event=stop_event,
+            aruco_detector=aruco_detector,
         )
         recorder.set_context(0, (0.0, 0.0, args.height), args.yaw, "no_flight", reset_tracking=True)
         recorder.start()
@@ -1019,6 +1138,7 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
         camera_type=camera_type,
         yaw=args.yaw,
         stop_event=stop_event,
+        aruco_detector=aruco_detector,
     )
     recorder.set_context(0, (0.0, 0.0, 0.0), args.yaw, "preflight", reset_tracking=True)
     recorder.start()
@@ -1171,6 +1291,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--video-camera-out", default="camera_overlay.avi")
     parser.add_argument("--video-map-out", default="map_trace.avi")
     parser.add_argument("--video-fps", type=float, default=10.0)
+    parser.add_argument("--aruco", action="store_true", help="Detect mission ArUco targets and add them to logs/overlay.")
+    parser.add_argument("--aruco-dict", default=DEFAULT_DICTIONARY, help="OpenCV ArUco dictionary name.")
     parser.add_argument("--show", action="store_true", help="Deprecated: ignored on headless/OpenCV-no-GUI builds.")
     parser.add_argument("--no-command-listener", action="store_true")
     parser.add_argument("--no-flight", action="store_true")
@@ -1243,6 +1365,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--battery-check-delay must be >= 0")
     if args.video_fps <= 0:
         raise ValueError("--video-fps must be positive")
+    if args.aruco and not args.aruco_dict.strip():
+        raise ValueError("--aruco-dict must not be empty")
     if not args.sdk2_camera_type.strip():
         raise ValueError("--sdk2-camera-type must not be empty")
     if args.takeoff_wait < 0 or args.wait_per_point <= 0 or args.no_flight_seconds <= 0:
