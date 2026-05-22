@@ -204,6 +204,8 @@ def run_control(args: argparse.Namespace) -> int:
     video_path = resolve_video_path(args)
     video_writer = None
     show_window = not args.no_window and not args.terminal_control
+    active_motion: tuple[float, float, float, float, str] | None = None
+    active_until = 0.0
 
     if show_window:
         cv2.namedWindow(args.window_name, cv2.WINDOW_NORMAL)
@@ -240,23 +242,31 @@ def run_control(args: argparse.Namespace) -> int:
                     time.sleep(args.loop_interval)
                     key = key_reader.read_key() if key_reader is not None else -1
 
-                command = "hold"
+                now = time.monotonic()
                 if key == -1:
-                    if flight_started:
+                    if flight_started and active_motion is not None and now < active_until:
+                        vx, vy, vz, yaw_rate, command = active_motion
+                        send_manual_speed(drone, vx, vy, vz, yaw_rate, args.command_interval)
+                    elif flight_started:
+                        active_motion = None
+                        command = "hold"
                         safe_hold(drone, args.command_interval)
                     continue
 
                 if key in (27, ord("x")):
                     status = "landing"
                     command = "land+exit"
+                    active_motion = None
                     safe_land(drone, args.command_interval)
                     flight_started = False
                     break
                 if key == ord(" "):
+                    active_motion = None
                     safe_hold(drone, args.command_interval)
                     command = "hold stop"
                     continue
                 if key == ord("1"):
+                    active_motion = None
                     arm_drone(drone)
                     is_armed = True
                     status = "armed"
@@ -264,6 +274,7 @@ def run_control(args: argparse.Namespace) -> int:
                     print(command)
                     continue
                 if key == ord("2"):
+                    active_motion = None
                     safe_hold(drone, args.command_interval)
                     if hasattr(drone, "disarm"):
                         drone.disarm()
@@ -274,6 +285,7 @@ def run_control(args: argparse.Namespace) -> int:
                     print(command)
                     continue
                 if key == ord("3"):
+                    active_motion = None
                     if not is_armed:
                         arm_drone(drone)
                         is_armed = True
@@ -287,6 +299,7 @@ def run_control(args: argparse.Namespace) -> int:
                 if key == ord("4"):
                     status = "landing"
                     command = "land"
+                    active_motion = None
                     print(command)
                     safe_land(drone, args.command_interval)
                     flight_started = False
@@ -294,6 +307,7 @@ def run_control(args: argparse.Namespace) -> int:
                 if key == ord("r"):
                     status = "rtl"
                     command = "rtl"
+                    active_motion = None
                     print(command)
                     return_to_launch_or_land(
                         drone=drone,
@@ -308,15 +322,24 @@ def run_control(args: argparse.Namespace) -> int:
 
                 movement = movement_for_key(key, args)
                 if movement is None:
-                    if flight_started:
+                    if flight_started and active_motion is not None and now < active_until:
+                        vx, vy, vz, yaw_rate, command = active_motion
+                        send_manual_speed(drone, vx, vy, vz, yaw_rate, args.command_interval)
+                    elif flight_started:
+                        active_motion = None
                         safe_hold(drone, args.command_interval)
-                    command = "unknown key"
+                        command = "hold"
+                    else:
+                        command = "unknown key"
                     continue
 
                 vx, vy, vz, yaw_rate, command = movement
                 if flight_started:
+                    active_motion = movement
+                    active_until = now + args.key_hold_time
                     send_manual_speed(drone, vx, vy, vz, yaw_rate, args.command_interval)
                 else:
+                    active_motion = None
                     command = "{} ignored before takeoff".format(command)
 
     except KeyboardInterrupt:
@@ -351,6 +374,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--yaw-rate", type=float, default=0.4, help="Yaw rate in rad/s.")
     parser.add_argument("--command-interval", type=float, default=0.2)
     parser.add_argument("--loop-interval", type=float, default=0.03)
+    parser.add_argument("--key-hold-time", type=float, default=0.45, help="How long one movement key press keeps sending speed commands.")
     parser.add_argument("--takeoff-on-start", action="store_true")
     parser.add_argument("--takeoff-wait", type=float, default=2.0)
     parser.add_argument("--rtl-height", type=float, default=1.0)
@@ -377,6 +401,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--speed, --vertical-speed and --yaw-rate must be positive")
     if args.command_interval <= 0 or args.loop_interval <= 0:
         raise ValueError("--command-interval and --loop-interval must be positive")
+    if args.key_hold_time <= 0:
+        raise ValueError("--key-hold-time must be positive")
     if args.rtl_height <= 0:
         raise ValueError("--rtl-height must be positive")
     if args.point_time < 0:
