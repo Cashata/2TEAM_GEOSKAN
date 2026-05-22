@@ -1,0 +1,10 @@
+```gitignore
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Executables
+drone_trajectory_control
+```
