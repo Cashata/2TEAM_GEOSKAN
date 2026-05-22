@@ -108,6 +108,28 @@ def read_camera_frame(camera):
         return None
 
 
+def resolve_video_path(args: argparse.Namespace) -> Path | None:
+    if args.no_video:
+        return None
+    raw_path = args.video_out.strip()
+    if not raw_path or raw_path.lower() == "none":
+        return None
+
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    video_path = Path(raw_path.format(timestamp=timestamp)).expanduser()
+    video_path.parent.mkdir(parents=True, exist_ok=True)
+    return video_path
+
+
+def create_video_writer(cv2, video_path: Path, frame, fps: float):
+    height, width = frame.shape[:2]
+    fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+    writer = cv2.VideoWriter(str(video_path), fourcc, fps, (width, height))
+    if not writer.isOpened():
+        raise RuntimeError("Cannot open video writer: {}".format(video_path))
+    return writer
+
+
 def run_control(args: argparse.Namespace) -> int:
     import cv2
     import numpy as np
@@ -135,6 +157,8 @@ def run_control(args: argparse.Namespace) -> int:
     flight_started = False
     status = "ready"
     command = "hold"
+    video_path = resolve_video_path(args)
+    video_writer = None
 
     cv2.namedWindow(args.window_name, cv2.WINDOW_NORMAL)
 
@@ -150,6 +174,11 @@ def run_control(args: argparse.Namespace) -> int:
         while True:
             frame = read_camera_frame(camera)
             frame = draw_hud(cv2, np, frame, status, command, args)
+            if video_path is not None:
+                if video_writer is None:
+                    video_writer = create_video_writer(cv2, video_path, frame, args.video_fps)
+                    print("Recording WASD video to {}".format(video_path))
+                video_writer.write(frame)
             cv2.imshow(args.window_name, frame)
 
             key = cv2.waitKey(max(1, int(args.loop_interval * 1000)))
@@ -244,6 +273,9 @@ def run_control(args: argparse.Namespace) -> int:
                 print("WARNING: landing on exit failed: {}".format(exc), file=sys.stderr)
         if camera is not None:
             camera.close()
+        if video_writer is not None:
+            video_writer.release()
+            print("Saved WASD video: {}".format(video_path))
         cv2.destroyAllWindows()
         if hasattr(drone, "close_connection"):
             drone.close_connection()
@@ -270,6 +302,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sdk2-camera-type", default="OPT")
     parser.add_argument("--camera-timeout", type=float, default=2.0)
     parser.add_argument("--no-camera", action="store_true")
+    parser.add_argument("--video-out", default="wasd_flight_{timestamp}.avi")
+    parser.add_argument("--video-fps", type=float, default=20.0)
+    parser.add_argument("--no-video", action="store_true")
     parser.add_argument("--window-name", default="pioneer_wasd_control")
     return parser
 
@@ -287,6 +322,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--move-timeout and --poll-interval must be positive")
     if args.camera_timeout <= 0:
         raise ValueError("--camera-timeout must be positive")
+    if args.video_fps <= 0:
+        raise ValueError("--video-fps must be positive")
     if args.battery_check_retries <= 0:
         raise ValueError("--battery-check-retries must be positive")
     if args.battery_check_delay < 0:
