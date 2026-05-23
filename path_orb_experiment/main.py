@@ -7,8 +7,12 @@ import cv2
 import numpy as np
 from pioneer_sdk2 import Pioneer, Camera, CameraType
 
-from PathFinder import PathFinder
-from orb import OrbDetector
+try:
+    from .PathFinder import PathFinder
+    from .orb import OrbDetector
+except ImportError:
+    from PathFinder import PathFinder
+    from orb import OrbDetector
 
 drone = Pioneer()
 camera = Camera(camera_type=CameraType.OPT)

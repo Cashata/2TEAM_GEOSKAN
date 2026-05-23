@@ -3,8 +3,12 @@ import time
 import cv2
 import numpy as np
 
-from PathFinder import PathFinder
-from SmoothPath import SmoothPath
+try:
+    from .PathFinder import PathFinder
+    from .SmoothPath import SmoothPath
+except ImportError:
+    from PathFinder import PathFinder
+    from SmoothPath import SmoothPath
 
 MAP_FILE = 'map-2.png'
 MAP_SCALE_FACTOR = 0.25

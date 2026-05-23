@@ -3,7 +3,10 @@ import time
 import cv2
 from pioneer_sdk2 import Pioneer, Camera, CameraType
 
-from orb import OrbDetector
+try:
+    from .orb import OrbDetector
+except ImportError:
+    from orb import OrbDetector
 
 ind = 0
 
