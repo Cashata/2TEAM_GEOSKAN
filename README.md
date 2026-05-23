@@ -36,7 +36,7 @@
 | `aruco_detector.py` | Re-export ArUco-детектора для старых импортов. |
 | `drone_trajectory_control.py` | Demo/compatibility wrapper для manual-speed trajectory control. |
 | `fly_record_video.py` | Готовый профиль полета по маленькому квадрату с записью видео и логов. |
-| `fly_find_id15.py` | Автономная миссия поиска ArUco ID 15, посадки на него, повторного взлета и возврата. |
+| `fly_find_id15.py` | Автономная миссия поиска ArUco ID 15: подлет, медленное снижение до высоты подбора магнитом и возврат домой. |
 | `aruco_tracker_standalone.py` | Самодостаточный трекер ArUco без зависимости от `geoscan_mission`. |
 | `aruco_hand_check.py` | Live preview для ручной проверки ArUco через MJPEG-сервер. |
 | `trajectory_builder_standalone.py` | Самодостаточное построение waypoint/spline-маршрутов без полета. |
@@ -136,11 +136,16 @@ Live hand-check ArUco:
 python aruco_hand_check.py --camera-source sdk2 --sdk2-camera-type OPT --preview-port 8001
 ```
 
-Миссия поиска и посадки на ID 15:
+Миссия поиска ID 15, снижения до 1 м для магнитного подбора и возврата:
 
 ```bash
 python fly_find_id15.py --reference map.jpg --camera-source sdk2 --sdk2-camera-type OPT
 ```
+
+По умолчанию `fly_find_id15.py` не садится на ArUco. После обнаружения ID15 он
+летит над маркером, ждет `--target-settle`, медленно снижается до
+`--pickup-height 1.0`, висит `--pickup-wait 5.0` секунд и затем возвращается к
+стартовой локальной точке на рабочей высоте.
 
 Готовый профиль полета с записью видео:
 

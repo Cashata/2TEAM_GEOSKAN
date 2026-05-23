@@ -6,7 +6,8 @@ Mission sequence:
 2. Lock current ORB map coordinates to current Pioneer LPS coordinates.
 3. Fly a small local scan pattern while the camera searches for ArUco ID 15.
 4. Convert the detected ID15 map coordinate to local LPS coordinates.
-5. Fly above ID15, land, take off again, return to the launch point, and land.
+5. Fly above ID15, pause, descend slowly to pickup height for a rope/magnet,
+   hover there, return to the launch point, and land.
 
 The script also serves a live MJPEG preview with ORB/ArUco overlays.
 """
@@ -441,21 +442,26 @@ def command_and_wait(
     event_logger: FlightEventLogger,
     phase: str,
     break_on_id15: bool = False,
+    speed: float | None = None,
+    move_timeout: float | None = None,
+    require_reached: bool = False,
 ) -> bool:
     state.set_phase(phase, point)
-    point_time = estimate_move_time(previous_point, point, args.speed)
+    command_speed = args.speed if speed is None else speed
+    point_time = estimate_move_time(previous_point, point, command_speed)
+    timeout = max(args.move_timeout if move_timeout is None else move_timeout, point_time + args.move_timeout_margin)
     event_logger.log(
         "{}_start".format(phase),
         phase,
         "Sending local point",
         target_point=point,
-        details={"point_time": point_time},
+        details={"point_time": point_time, "speed": command_speed, "timeout": timeout},
     )
     command_local_point(drone, point[0], point[1], point[2], yaw=args.yaw, point_time=point_time)
 
     start = time.monotonic()
     reached = False
-    while not stop_event.is_set() and time.monotonic() - start < args.move_timeout:
+    while not stop_event.is_set() and time.monotonic() - start < timeout:
         if break_on_id15 and state.id15_ready():
             event_logger.log("{}_interrupted_id15".format(phase), phase, "ID15 detected during movement", target_point=point)
             return True
@@ -469,14 +475,56 @@ def command_and_wait(
                 break
         time.sleep(args.poll_interval)
 
+    final_distance = None
+    if not reached and hasattr(drone, "get_local_position_lps"):
+        try:
+            position = local_position(drone)
+            final_distance = math.dist(position, point)
+            reached = final_distance <= args.reach_tolerance
+        except Exception as exc:
+            event_logger.log("{}_position_check_error".format(phase), phase, str(exc), target_point=point)
+
     event_logger.log(
         "{}_complete".format(phase) if reached else "{}_timeout".format(phase),
         phase,
         "Local point reached" if reached else "Local point was not confirmed before timeout",
         target_point=point,
-        details={"reached": reached},
+        details={"reached": reached, "final_distance": final_distance, "reach_tolerance": args.reach_tolerance},
     )
+    if require_reached and not reached:
+        raise RuntimeError("{} did not reach target point within tolerance".format(phase))
     return reached
+
+
+def hold_position(
+    state: MissionState,
+    event_logger: FlightEventLogger,
+    phase: str,
+    point: Point3,
+    seconds: float,
+    stop_event: threading.Event,
+) -> None:
+    if seconds <= 0:
+        return
+    state.set_phase(phase, point)
+    event_logger.log(
+        "{}_start".format(phase),
+        phase,
+        "Holding position",
+        target_point=point,
+        details={"duration_s": seconds},
+    )
+    start = time.monotonic()
+    while not stop_event.is_set() and time.monotonic() - start < seconds:
+        remaining = seconds - (time.monotonic() - start)
+        time.sleep(min(0.1, max(remaining, 0.0)))
+    event_logger.log(
+        "{}_complete".format(phase),
+        phase,
+        "Hold complete",
+        target_point=point,
+        details={"duration_s": seconds, "interrupted": stop_event.is_set()},
+    )
 
 
 def calibrate_map_to_local_transform(
@@ -666,7 +714,13 @@ def run(args: argparse.Namespace) -> int:
             "mission_start",
             "setup",
             "ID15 mission started",
-            details={"camera": camera_name, "reference": args.reference, "height": args.height},
+            details={
+                "camera": camera_name,
+                "reference": args.reference,
+                "height": args.height,
+                "pickup_height": args.pickup_height,
+                "pickup_wait": args.pickup_wait,
+            },
         )
         vision_thread.start()
         check_battery_or_abort(drone, args.min_battery_voltage, args.battery_check_retries, args.battery_check_delay)
@@ -719,40 +773,57 @@ def run(args: argparse.Namespace) -> int:
         if not state.id15_ready():
             raise RuntimeError("ID15 was not found during scan")
 
+        previous = local_position(drone)
         id15_above = state.id15_target(args.height)
         if id15_above is None:
             raise RuntimeError("ID15 target local coordinates are not available")
 
-        command_and_wait(drone, id15_above, previous, args, stop_event, state, event_logger, "go_to_id15")
-        time.sleep(args.target_settle)
+        command_and_wait(
+            drone,
+            id15_above,
+            previous,
+            args,
+            stop_event,
+            state,
+            event_logger,
+            "go_to_id15",
+            require_reached=True,
+        )
+        hold_position(state, event_logger, "target_settle", id15_above, args.target_settle, stop_event)
+        if stop_event.is_set():
+            return 130
 
-        low_point = (id15_above[0], id15_above[1], args.landing_approach_height)
-        command_and_wait(drone, low_point, id15_above, args, stop_event, state, event_logger, "descend_to_id15")
-        land(drone, event_logger, "land_on_id15")
-        flight_started = False
-        time.sleep(args.landed_wait)
+        pickup_point = (id15_above[0], id15_above[1], args.pickup_height)
+        command_and_wait(
+            drone,
+            pickup_point,
+            id15_above,
+            args,
+            stop_event,
+            state,
+            event_logger,
+            "descend_to_pickup_height",
+            speed=args.pickup_descent_speed,
+            require_reached=True,
+        )
+        hold_position(state, event_logger, "pickup_hover", pickup_point, args.pickup_wait, stop_event)
 
         if stop_event.is_set():
             return 130
 
-        state.set_phase("retakeoff")
-        if hasattr(drone, "arm"):
-            event_logger.log("retakeoff_arm_start", "retakeoff", "Arming before retakeoff")
-            armed = drone.arm(timeout=5, retries=1)
-            if armed is False:
-                raise RuntimeError("pioneer.arm() returned False before retakeoff")
-            is_armed = True
-            event_logger.log("retakeoff_arm_complete", "retakeoff", "Drone armed before retakeoff")
-        event_logger.log("retakeoff_start", "retakeoff", "Taking off again after ID15 landing")
-        takeoff = drone.takeoff()
-        if takeoff is False:
-            raise RuntimeError("pioneer.takeoff() returned False on retakeoff")
-        flight_started = True
-        time.sleep(args.takeoff_wait)
-
         current = local_position(drone)
         return_high = (start_local[0], start_local[1], args.height)
-        command_and_wait(drone, return_high, current, args, stop_event, state, event_logger, "return_home")
+        command_and_wait(
+            drone,
+            return_high,
+            current,
+            args,
+            stop_event,
+            state,
+            event_logger,
+            "return_home",
+            require_reached=True,
+        )
         land(drone, event_logger, "final_land")
         flight_started = False
         time.sleep(args.landed_wait)
@@ -798,7 +869,7 @@ def run(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     defaults = timestamped_default_paths()
-    parser = argparse.ArgumentParser(description="Take off, find ArUco ID15 using ORB map coordinates, land on it, and return.")
+    parser = argparse.ArgumentParser(description="Take off, find ArUco ID15 using ORB map coordinates, hover low for magnet pickup, and return.")
     parser.add_argument("--reference", default="map.jpg")
     parser.add_argument("--map-width-m", type=float, default=3.0)
     parser.add_argument("--map-height-m", type=float, default=3.0)
@@ -813,13 +884,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--delivery-id", type=int, default=15)
     parser.add_argument("--forbidden-id", type=int)
     parser.add_argument("--height", type=float, default=2.0)
-    parser.add_argument("--landing-approach-height", type=float, default=0.35)
+    parser.add_argument(
+        "--pickup-height",
+        "--landing-approach-height",
+        dest="pickup_height",
+        type=float,
+        default=1.0,
+        help="Hover height above ID15 for rope/magnet pickup. The drone does not land on ID15.",
+    )
+    parser.add_argument("--pickup-descent-speed", type=float, default=0.06)
+    parser.add_argument("--pickup-wait", type=float, default=5.0)
     parser.add_argument("--speed", type=float, default=0.18)
     parser.add_argument("--yaw", type=float, default=0.0)
     parser.add_argument("--takeoff-wait", type=float, default=3.0)
     parser.add_argument("--landed-wait", type=float, default=3.0)
     parser.add_argument("--target-settle", type=float, default=1.0)
     parser.add_argument("--move-timeout", type=float, default=25.0)
+    parser.add_argument("--move-timeout-margin", type=float, default=5.0)
+    parser.add_argument("--reach-tolerance", type=float, default=0.2)
     parser.add_argument("--poll-interval", type=float, default=0.15)
     parser.add_argument("--scan-area-size", type=float, default=1.2)
     parser.add_argument("--scan-grid", type=int, default=3)
@@ -868,10 +950,20 @@ def build_parser() -> argparse.ArgumentParser:
 def validate_args(args: argparse.Namespace) -> None:
     if args.height <= 0:
         raise ValueError("--height must be positive")
-    if args.landing_approach_height <= 0 or args.landing_approach_height >= args.height:
-        raise ValueError("--landing-approach-height must be positive and lower than --height")
+    if args.pickup_height <= 0 or args.pickup_height >= args.height:
+        raise ValueError("--pickup-height must be positive and lower than --height")
+    if args.pickup_descent_speed <= 0:
+        raise ValueError("--pickup-descent-speed must be positive")
+    if args.pickup_wait < 0:
+        raise ValueError("--pickup-wait must be non-negative")
     if args.speed <= 0:
         raise ValueError("--speed must be positive")
+    if args.target_settle < 0:
+        raise ValueError("--target-settle must be non-negative")
+    if args.move_timeout_margin < 0:
+        raise ValueError("--move-timeout-margin must be non-negative")
+    if args.reach_tolerance <= 0:
+        raise ValueError("--reach-tolerance must be positive")
     if args.scan_area_size <= 0:
         raise ValueError("--scan-area-size must be positive")
     if args.scan_grid <= 0:
