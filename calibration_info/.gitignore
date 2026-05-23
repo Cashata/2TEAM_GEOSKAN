@@ -1,0 +1,13 @@
+.idea/
+__pycache__/
+*.py[cod]
+*.log
+*.csv
+debug/
+out/
+dataset_landmarks/
+repomix-output*.md
+calibration_frames/
+calibration_debug/
+calibration_preview.jpg
+data.yml

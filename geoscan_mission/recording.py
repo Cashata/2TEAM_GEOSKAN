@@ -177,13 +177,20 @@ class FlightVideoLogger:
         map_path: str | None,
         fps: float,
         localizer: OrbRansacLocalizer,
+        camera_clean_path: str | None = None,
+        map_max_size: int = 960,
     ) -> None:
         self.camera_path = camera_path if video_path_enabled(camera_path) else None
+        self.camera_clean_path = camera_clean_path if video_path_enabled(camera_clean_path) else None
         self.map_path = map_path if video_path_enabled(map_path) else None
         self.fps = fps
         self.localizer = localizer
         self.camera_writer = None
+        self.camera_clean_writer = None
         self.map_writer = None
+        self.map_max_size = map_max_size
+        self.map_scale = self.resolve_map_scale(map_max_size)
+        self.map_base = None
         self.trace: list[tuple[float, float]] = []
 
     def open_writer(self, path: str, size: tuple[int, int]):
@@ -193,6 +200,29 @@ class FlightVideoLogger:
         if not writer.isOpened():
             raise RuntimeError("Cannot open video writer: {}".format(path))
         return writer
+
+    def resolve_map_scale(self, max_size: int) -> float:
+        if max_size <= 0:
+            return 1.0
+        longest = max(self.localizer.ref_w, self.localizer.ref_h)
+        if longest <= max_size:
+            return 1.0
+        return max_size / float(longest)
+
+    def map_base_canvas(self) -> np.ndarray:
+        if self.map_base is None:
+            canvas = cv2.cvtColor(self.localizer.reference, cv2.COLOR_GRAY2BGR)
+            if self.map_scale < 1.0:
+                width = max(1, int(round(canvas.shape[1] * self.map_scale)))
+                height = max(1, int(round(canvas.shape[0] * self.map_scale)))
+                canvas = cv2.resize(canvas, (width, height), interpolation=cv2.INTER_AREA)
+            self.map_base = canvas
+        return self.map_base.copy()
+
+    def map_overlay_point_to_pixel(self, x_m: float, y_m: float) -> tuple[int, int]:
+        px = int(round(x_m / self.localizer.map_width_m * self.localizer.ref_w * self.map_scale))
+        py = int(round(y_m / self.localizer.map_height_m * self.localizer.ref_h * self.map_scale))
+        return px, py
 
     def camera_overlay(
         self,
@@ -252,13 +282,13 @@ class FlightVideoLogger:
         return overlay
 
     def map_overlay(self, result: LocalizeResult, point_index: int) -> np.ndarray:
-        canvas = cv2.cvtColor(self.localizer.reference, cv2.COLOR_GRAY2BGR)
+        canvas = self.map_base_canvas()
 
         if result.ok and result.x_m is not None and result.y_m is not None:
             self.trace.append((result.x_m, result.y_m))
 
         if len(self.trace) >= 2:
-            points = np.array([map_point_to_pixel(self.localizer, x, y) for x, y in self.trace], dtype=np.int32)
+            points = np.array([self.map_overlay_point_to_pixel(x, y) for x, y in self.trace], dtype=np.int32)
             cv2.polylines(canvas, [points], False, (0, 220, 220), 2)
 
         current_x = result.x_m if result.ok else result.raw_x_m
@@ -270,7 +300,7 @@ class FlightVideoLogger:
 
         color = (0, 255, 0) if result.ok else (0, 0, 255)
         if current_x is not None and current_y is not None:
-            cv2.circle(canvas, map_point_to_pixel(self.localizer, current_x, current_y), 8, color, -1)
+            cv2.circle(canvas, self.map_overlay_point_to_pixel(current_x, current_y), 8, color, -1)
 
         label = "WP {} {}".format(point_index, "OK" if result.ok else "FAIL")
         cv2.putText(canvas, label, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
@@ -286,6 +316,12 @@ class FlightVideoLogger:
         aruco_markers: list[ArucoMarker] | None = None,
         aruco_summary: dict[str, object] | None = None,
     ) -> None:
+        if self.camera_clean_path:
+            if self.camera_clean_writer is None:
+                size = (frame_bgr.shape[1], frame_bgr.shape[0])
+                self.camera_clean_writer = self.open_writer(self.camera_clean_path, size)
+            self.camera_clean_writer.write(frame_bgr)
+
         if self.camera_path:
             camera_frame = self.camera_overlay(
                 frame_bgr,
@@ -308,6 +344,8 @@ class FlightVideoLogger:
             self.map_writer.write(map_frame)
 
     def close(self) -> None:
+        if self.camera_clean_writer is not None:
+            self.camera_clean_writer.release()
         if self.camera_writer is not None:
             self.camera_writer.release()
         if self.map_writer is not None:

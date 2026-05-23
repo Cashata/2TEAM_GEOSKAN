@@ -85,6 +85,8 @@ def fly_local_waypoints(args: argparse.Namespace) -> int:
         map_path=args.video_map_out,
         fps=args.video_fps,
         localizer=localizer,
+        camera_clean_path=args.video_camera_clean_out,
+        map_max_size=args.video_map_max_size,
     )
     event_logger = FlightEventLogger(args.events_log)
     event_logger.log(
@@ -590,7 +592,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--clahe-tile", type=int, default=8)
     parser.add_argument("--min-inlier-ratio", type=float, default=0.55)
     parser.add_argument("--min-homography-area-m2", type=float, default=0.03)
-    parser.add_argument("--max-homography-area-m2", type=float, default=0.0)
+    parser.add_argument("--max-homography-area-m2", type=float, default=1.5)
     parser.add_argument("--max-position-jump", type=float, default=0.5)
     parser.add_argument("--ema-alpha", type=float, default=0.3)
     parser.add_argument("--speed", type=float, default=0.15)
@@ -621,8 +623,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--csv", default="orb_ransac_localization.csv")
     parser.add_argument("--events-log", default="flight_events.csv", help="CSV log for mission events/actions.")
     parser.add_argument("--debug-dir")
+    parser.add_argument("--video-camera-clean-out", default="camera_clean.avi")
     parser.add_argument("--video-camera-out", default="camera_overlay.avi")
-    parser.add_argument("--video-map-out", default="map_trace.avi")
+    parser.add_argument("--video-map-out", default="none")
+    parser.add_argument("--video-map-max-size", type=int, default=960)
     parser.add_argument("--video-fps", type=float, default=10.0)
     parser.add_argument("--aruco", action="store_true", help="Detect mission ArUco targets and add them to logs/overlay.")
     parser.add_argument("--aruco-dict", default=DEFAULT_DICTIONARY, help="OpenCV ArUco dictionary name.")
@@ -703,6 +707,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--battery-check-delay must be >= 0")
     if args.video_fps <= 0:
         raise ValueError("--video-fps must be positive")
+    if args.video_map_max_size <= 0:
+        raise ValueError("--video-map-max-size must be positive")
     if args.aruco and not args.aruco_dict.strip():
         raise ValueError("--aruco-dict must not be empty")
     if not args.sdk2_camera_type.strip():

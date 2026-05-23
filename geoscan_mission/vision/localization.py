@@ -209,6 +209,79 @@ class OrbRansacLocalizer:
             ), None, frame_bgr
 
         homography_area = self.homography_area_m2(homography, frame_gray.shape[:2])
+        if good_matches < self.min_matches:
+            return (
+                self.reject_result(
+                    "not enough ORB matches",
+                    good_matches=good_matches,
+                    inliers=inliers,
+                    inlier_ratio=inlier_ratio,
+                    homography_area=homography_area,
+                ),
+                homography,
+                frame_bgr,
+            )
+        if inliers < self.min_inliers:
+            return (
+                self.reject_result(
+                    "not enough RANSAC inliers",
+                    good_matches=good_matches,
+                    inliers=inliers,
+                    inlier_ratio=inlier_ratio,
+                    homography_area=homography_area,
+                ),
+                homography,
+                frame_bgr,
+            )
+        if inlier_ratio < self.min_inlier_ratio:
+            return (
+                self.reject_result(
+                    "inlier ratio too low",
+                    good_matches=good_matches,
+                    inliers=inliers,
+                    inlier_ratio=inlier_ratio,
+                    homography_area=homography_area,
+                ),
+                homography,
+                frame_bgr,
+            )
+        if homography_area is None:
+            return (
+                self.reject_result(
+                    "homography area is invalid",
+                    good_matches=good_matches,
+                    inliers=inliers,
+                    inlier_ratio=inlier_ratio,
+                    homography_area=homography_area,
+                ),
+                homography,
+                frame_bgr,
+            )
+        if homography_area < self.min_homography_area_m2:
+            return (
+                self.reject_result(
+                    "homography area too small",
+                    good_matches=good_matches,
+                    inliers=inliers,
+                    inlier_ratio=inlier_ratio,
+                    homography_area=homography_area,
+                ),
+                homography,
+                frame_bgr,
+            )
+        if homography_area > self.max_homography_area_m2:
+            return (
+                self.reject_result(
+                    "homography area too large",
+                    good_matches=good_matches,
+                    inliers=inliers,
+                    inlier_ratio=inlier_ratio,
+                    homography_area=homography_area,
+                ),
+                homography,
+                frame_bgr,
+            )
+
         coordinates = self.orb_grid._coordinates_from_homography(frame_gray, homography, in_meters=True)
         if coordinates is None:
             return (
