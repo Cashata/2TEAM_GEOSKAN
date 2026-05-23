@@ -145,7 +145,10 @@ python fly_find_id15.py --reference map.jpg --camera-source sdk2 --sdk2-camera-t
 По умолчанию `fly_find_id15.py` не садится на ArUco. После обнаружения ID15 он
 летит над маркером, ждет `--target-settle`, медленно снижается до
 `--pickup-height 1.0`, висит `--pickup-wait 5.0` секунд и затем возвращается к
-стартовой локальной точке на рабочей высоте.
+стартовой локальной точке на рабочей высоте. Во время работы сохраняются
+`flights/<stamp>_id15_camera_clean.avi` и
+`flights/<stamp>_id15_camera_overlay.avi`; запись можно отключить через
+`--video-camera-clean-out none --video-camera-out none`.
 
 Готовый профиль полета с записью видео:
 

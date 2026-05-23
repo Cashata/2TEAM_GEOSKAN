@@ -38,7 +38,7 @@ from geoscan_mission.flight.control import (
     import_pioneer_sdk2,
     start_command_listener,
 )
-from geoscan_mission.recording import FlightEventLogger, append_csv
+from geoscan_mission.recording import FlightEventLogger, append_csv, video_path_enabled
 from geoscan_mission.vision.calibration import load_camera_calibration
 from geoscan_mission.vision.localization import LocalizeResult, OrbRansacLocalizer
 
@@ -161,7 +161,43 @@ def timestamped_default_paths() -> dict[str, str]:
         "localization": "flights/{}_id15_localization.csv".format(stamp),
         "aruco": "flights/{}_id15_aruco.csv".format(stamp),
         "preview": "flights/{}_id15_preview.jpg".format(stamp),
+        "camera_clean": "flights/{}_id15_camera_clean.avi".format(stamp),
+        "camera_overlay": "flights/{}_id15_camera_overlay.avi".format(stamp),
     }
+
+
+class MissionVideoRecorder:
+    def __init__(self, clean_path: str | None, overlay_path: str | None, fps: float) -> None:
+        self.clean_path = clean_path if video_path_enabled(clean_path) else None
+        self.overlay_path = overlay_path if video_path_enabled(overlay_path) else None
+        self.fps = fps
+        self.clean_writer = None
+        self.overlay_writer = None
+
+    def open_writer(self, path: str, frame: np.ndarray):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        size = (frame.shape[1], frame.shape[0])
+        writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"MJPG"), self.fps, size)
+        if not writer.isOpened():
+            raise RuntimeError("Cannot open video writer: {}".format(path))
+        return writer
+
+    def write(self, clean_frame: np.ndarray, overlay_frame: np.ndarray) -> None:
+        if self.clean_path:
+            if self.clean_writer is None:
+                self.clean_writer = self.open_writer(self.clean_path, clean_frame)
+            self.clean_writer.write(clean_frame)
+
+        if self.overlay_path:
+            if self.overlay_writer is None:
+                self.overlay_writer = self.open_writer(self.overlay_path, overlay_frame)
+            self.overlay_writer.write(overlay_frame)
+
+    def close(self) -> None:
+        if self.clean_writer is not None:
+            self.clean_writer.release()
+        if self.overlay_writer is not None:
+            self.overlay_writer.release()
 
 
 def create_localizer(args: argparse.Namespace) -> OrbRansacLocalizer:
@@ -285,6 +321,11 @@ def vision_loop(
     params = aruco.create_detector_parameters()
     detector = aruco.create_detector(dictionary, params)
     camera_matrix, dist_coeffs = aruco.load_calibration(args.calibration)
+    video_recorder = MissionVideoRecorder(
+        args.video_camera_clean_out,
+        args.video_camera_out,
+        args.video_fps,
+    )
     seen_ids: set[int] = set()
     last_preview_jpeg_time = 0.0
 
@@ -351,6 +392,7 @@ def vision_loop(
             append_csv(args.localization_csv, row)
 
             overlay = draw_overlay(processed_frame, result, records, visible_ids, state)
+            video_recorder.write(processed_frame, overlay)
             preview_store.update(overlay, args.preview_quality)
             last_preview_jpeg_time = aruco_hand_check.save_preview_jpeg(
                 args.preview_jpeg,
@@ -362,6 +404,8 @@ def vision_loop(
     except Exception as exc:
         state.set_error(exc)
         stop_event.set()
+    finally:
+        video_recorder.close()
 
 
 def wait_for_orb_fix(state: MissionState, timeout: float, stop_event: threading.Event) -> tuple[float, float]:
@@ -720,6 +764,8 @@ def run(args: argparse.Namespace) -> int:
                 "height": args.height,
                 "pickup_height": args.pickup_height,
                 "pickup_wait": args.pickup_wait,
+                "video_camera_clean_out": args.video_camera_clean_out,
+                "video_camera_out": args.video_camera_out,
             },
         )
         vision_thread.start()
@@ -937,6 +983,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--preview-quality", type=int, default=80)
     parser.add_argument("--preview-jpeg", default=defaults["preview"])
     parser.add_argument("--preview-jpeg-interval", type=float, default=0.2)
+    parser.add_argument("--video-camera-clean-out", default=defaults["camera_clean"])
+    parser.add_argument("--video-camera-out", default=defaults["camera_overlay"])
+    parser.add_argument("--video-fps", type=float, default=15.0)
     parser.add_argument("--events-log", default=defaults["events"])
     parser.add_argument("--localization-csv", default=defaults["localization"])
     parser.add_argument("--aruco-csv", default=defaults["aruco"])
@@ -982,6 +1031,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--transform-max-condition must be greater than 1")
     if args.preview_port < 0 or args.preview_port > 65535:
         raise ValueError("--preview-port must be between 0 and 65535")
+    if args.video_fps <= 0:
+        raise ValueError("--video-fps must be positive")
 
 
 def main(argv: list[str] | None = None) -> int:
